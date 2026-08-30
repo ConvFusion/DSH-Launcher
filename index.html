@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/png" href="/icon.png" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>DeepSeek Harness Launcher</title>
+    <style>
+      html,
+      body {
+        background: #0b0f1a;
+        margin: 0;
+      }
+    </style>
+    <script>
+      // Paint the initial background to match the OS theme before the app
+      // bundle loads (avoids a dark flash in light mode).
+      if (window.matchMedia("(prefers-color-scheme: light)").matches) {
+        document.documentElement.style.background = "#f3f5fb";
+      }
+    </script>
+  </head>
+
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
