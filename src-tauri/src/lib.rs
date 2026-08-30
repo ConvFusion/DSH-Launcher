@@ -78,12 +78,18 @@ pub fn run(launched_by_autostart: bool) {
         .run(|app_handle, event| {
             // macOS: clicking the Dock icon reopens the app even when the
             // window is hidden to the tray — show the main window again.
+            // (RunEvent::Reopen only exists on macOS.)
+            #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = event {
                 if let Some(window) = app_handle.get_webview_window("main") {
                     let _ = window.show();
                     let _ = window.unminimize();
                     let _ = window.set_focus();
                 }
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                let _ = (app_handle, event);
             }
         });
 }

@@ -340,8 +340,9 @@ impl ProcessManager {
             .stderr(std::process::Stdio::piped());
         #[cfg(windows)]
         {
-            use tokio::process::CommandExt;
             // Detach from any console; the child is a GUI service.
+            // (tokio::process::Command exposes creation_flags as an inherent
+            // method on Windows — no trait import needed.)
             cmd.creation_flags(0x00000200 | 0x00000010); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
         }
 
