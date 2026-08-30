@@ -362,31 +362,68 @@ pub async fn install_dsh(
         )
     })?;
 
-    let mut cmd = tokio::process::Command::new(node);
-    cmd.arg(&npm)
-        .arg("install")
-        .arg("--prefix")
-        .arg(dir)
-        .arg("--no-audit")
-        .arg("--no-fund")
-        .arg("--loglevel=warn")
-        .arg(format!("{DSH_PACKAGE}@latest"))
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
     log(&format!("running: {} install {DSH_PACKAGE}@latest", node.display()));
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("start npm: {e}"))?;
 
-    let out = tokio::time::timeout(
-        Duration::from_secs(NPM_TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await
-    .map_err(|_| "npm install timed out after 10 minutes.".to_string())?
-    .map_err(|e| format!("run npm: {e}"))?;
+    // One attempt: spawn npm and wait (with a hard timeout). A timeout is a
+    // hard error and is NOT retried — a hung network would otherwise eat
+    // twice the timeout.
+    let attempt = || async {
+        let mut cmd = tokio::process::Command::new(node);
+        cmd.arg(&npm)
+            .arg("install")
+            .arg("--prefix")
+            .arg(dir)
+            .arg("--no-audit")
+            .arg("--no-fund")
+            .arg("--loglevel=warn")
+            .arg(format!("{DSH_PACKAGE}@latest"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("start npm: {e}"))?;
+        tokio::time::timeout(
+            Duration::from_secs(NPM_TIMEOUT_SECS),
+            child.wait_with_output(),
+        )
+        .await
+        .map_err(|_| "npm install timed out after 10 minutes.".to_string())?
+        .map_err(|e| format!("run npm: {e}"))
+    };
+
+    let is_transient = |combined: &str| {
+        const TRANSIENT_MARKERS: [&str; 6] = [
+            "ETIMEDOUT",
+            "ECONNRESET",
+            "ECONNREFUSED",
+            "ENOTFOUND",
+            "EAI_AGAIN",
+            "socket hang up",
+        ];
+        combined.is_empty() || TRANSIENT_MARKERS.iter().any(|m| combined.contains(m))
+    };
+
+    let out = attempt().await?;
+    // registry.npmjs.org is flaky on some networks; a second attempt right
+    // after a network-ish failure usually succeeds (the old workaround was
+    // "click install again" manually).
+    let (out, retried) = if out.status.success() {
+        (out, false)
+    } else {
+        let combined = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if is_transient(&combined) {
+            log("npm install failed (likely network) — retrying once after 2s…");
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            (attempt().await?, true)
+        } else {
+            (out, false)
+        }
+    };
 
     let stdout = String::from_utf8_lossy(&out.stdout).to_string();
     let stderr = String::from_utf8_lossy(&out.stderr).to_string();
@@ -402,6 +439,8 @@ pub async fn install_dsh(
             "npm install failed. {}\n\nShow Details for the full npm output.",
             if combined.is_empty() {
                 "No output was produced (check your network connection)."
+            } else if retried {
+                "A second attempt also failed — check the details for npm output."
             } else {
                 "Check the details for npm output."
             }
