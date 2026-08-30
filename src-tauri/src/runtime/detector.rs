@@ -47,11 +47,20 @@ fn all_node_candidates() -> Vec<NodeInfo> {
     };
 
     // 1. Bundled runtimes (every version that was ever installed).
+    //    Layout: Unix archives extract node into <dir>/bin/node; Windows
+    //    archives put node.exe at the archive root (no bin/ directory).
     if let Ok(entries) = fs_read_dir(&runtime_dir()) {
         for entry in entries {
-            let dir = entry.join("bin");
-            let bin = if cfg!(windows) { dir.join("node.exe") } else { dir.join("node") };
-            add(&bin, NodeSource::Bundled);
+            let mut cands: Vec<PathBuf> = Vec::new();
+            if cfg!(windows) {
+                cands.push(entry.join("node.exe"));
+                cands.push(entry.join("bin").join("node.exe"));
+            } else {
+                cands.push(entry.join("bin").join("node"));
+            }
+            for bin in cands {
+                add(&bin, NodeSource::Bundled);
+            }
         }
     }
 
@@ -199,9 +208,9 @@ fn known_node_paths() -> Vec<PathBuf> {
             out.push(PathBuf::from(pf86).join("nodejs/node.exe"));
         }
         if let Ok(la) = std::env::var("LOCALAPPDATA") {
-            out.push(PathBuf::from(la).join("Programs/nodejs/node.exe"));
+            out.push(PathBuf::from(la.as_str()).join("Programs/nodejs/node.exe"));
             // fnm multishells: one snapshot dir per shell that activated fnm
-            if let Ok(entries) = fs::read_dir(PathBuf::from(la).join("fnm_multishells")) {
+            if let Ok(entries) = fs::read_dir(PathBuf::from(la.as_str()).join("fnm_multishells")) {
                 for e in entries.flatten() {
                     out.push(e.path().join("node.exe"));
                 }
@@ -501,12 +510,30 @@ fn detect_global_dsh() -> Option<DshInfo> {
 }
 
 /// Locate the `npm-cli.js` belonging to a Node installation, so we can run npm
-/// without depending on the `npm`/`npm.cmd` shims on PATH.
+/// without depending on the `npm`/`npm.cmd` shims on PATH (those shims
+/// resolve against whichever node happens to be first on PATH, which may not
+/// be the runtime we selected).
+///
+/// npm's location relative to the node executable varies by distribution:
+///  * Windows archives / standard installs / fnm / nvm-windows: npm sits in
+///    `node_modules/npm/` right next to `node.exe`.
+///  * Unix archives / Homebrew / distro packages: `node` lives in
+///    `<prefix>/bin`, npm in `<prefix>/lib/node_modules/npm/`.
+/// (The npm *global prefix* — e.g. `%APPDATA%\npm` — is where `npm i -g`
+/// stores user packages; it is not where the runtime's own npm lives.)
 pub fn npm_cli_for(node: &Path) -> Option<PathBuf> {
     let real = std::fs::canonicalize(node).unwrap_or_else(|_| node.to_path_buf());
-    let home = real.parent()?.parent()?;
-    let cli = home.join("lib/node_modules/npm/bin/npm-cli.js");
-    cli.exists().then(|| cli)
+    let dir = real.parent()?;
+    let candidates = [
+        dir.join("node_modules").join("npm").join("bin").join("npm-cli.js"),
+        dir.join("..")
+            .join("lib")
+            .join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npm-cli.js"),
+    ];
+    candidates.iter().find(|c| c.exists()).map(|c| c.to_path_buf())
 }
 
 #[cfg(test)]
@@ -581,6 +608,48 @@ mod tests {
         println!("detect_dsh_in(pkg_dir) = {info:?}");
         // The reported path must be the install root.
         assert!(info.path.join("node_modules").join(DSH_PACKAGE).join("package.json").exists());
+    }
+
+    #[test]
+    fn npm_cli_for_locates_runtime_bundled_npm() {
+        // Layout A: node executable next to node_modules/npm — Windows
+        // archives / standard installs / fnm / nvm-windows.
+        // Layout B: <prefix>/bin/node + <prefix>/lib/node_modules/npm —
+        // Unix archives, Homebrew, distro packages.
+        let base = std::env::temp_dir().join(format!("dsh-npmcli-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+
+        let a = base.join("a");
+        std::fs::create_dir_all(a.join("node_modules/npm/bin")).unwrap();
+        std::fs::write(a.join("node_modules/npm/bin/npm-cli.js"), "").unwrap();
+        let a_node = a.join("node.exe");
+        std::fs::write(&a_node, "").unwrap();
+        let got = npm_cli_for(&a_node);
+        assert!(
+            got.as_ref().map(|p| p.exists() && p.ends_with("npm-cli.js")).unwrap_or(false),
+            "layout A: {got:?}"
+        );
+
+        let b = base.join("b");
+        std::fs::create_dir_all(b.join("bin")).unwrap();
+        std::fs::create_dir_all(b.join("lib/node_modules/npm/bin")).unwrap();
+        std::fs::write(b.join("lib/node_modules/npm/bin/npm-cli.js"), "").unwrap();
+        let b_node = b.join("bin/node");
+        std::fs::write(&b_node, "").unwrap();
+        let got = npm_cli_for(&b_node);
+        assert!(
+            got.as_ref().map(|p| p.exists() && p.ends_with("npm-cli.js")).unwrap_or(false),
+            "layout B: {got:?}"
+        );
+
+        // No npm in either layout → None.
+        let c = base.join("c");
+        std::fs::create_dir_all(&c).unwrap();
+        let c_node = c.join("node");
+        std::fs::write(&c_node, "").unwrap();
+        assert!(npm_cli_for(&c_node).is_none());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

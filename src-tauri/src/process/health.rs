@@ -88,7 +88,7 @@ pub fn listener_pid(_host: &str, port: u16) -> Option<u32> {
         let needle = format!(":{port}");
         for line in text.lines() {
             if line.contains(&needle) && line.contains("LISTENING") {
-                if let Some(pid) = line.rsplit_whitespace().next() {
+                if let Some(pid) = line.split_whitespace().next_back() {
                     if let Ok(p) = pid.parse() {
                         return Some(p);
                     }

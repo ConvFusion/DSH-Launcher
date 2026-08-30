@@ -166,7 +166,7 @@ pub fn installed_path(id: BrowserId) -> Option<PathBuf> {
         for var in envs {
             let Ok(base) = std::env::var(var) else { continue };
             for r in rel {
-                let p = PathBuf::from(base).join(r);
+                let p = PathBuf::from(base.as_str()).join(r);
                 if p.exists() {
                     return Some(p);
                 }

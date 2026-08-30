@@ -133,6 +133,20 @@ fn sha256_of_file(path: &std::path::Path) -> Result<String, String> {
     Ok(hex::encode(h.finalize()))
 }
 
+/// Locate the node executable inside an installed runtime directory.
+/// Windows archives place `node.exe` at the runtime root; Unix archives use
+/// `<root>/bin/node`. Both Windows layouts are accepted for robustness.
+fn runtime_node_bin(dir: &std::path::Path) -> Option<PathBuf> {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if cfg!(windows) {
+        candidates.push(dir.join("node.exe"));
+        candidates.push(dir.join("bin").join("node.exe"));
+    } else {
+        candidates.push(dir.join("bin").join("node"));
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
 /// Install the bundled Node.js runtime. Returns the installed version.
 pub async fn install_node(on_progress: Option<Box<dyn Fn(u64, u64) + Send>>) -> Result<String, String> {
     let version = pick_node_version().await;
@@ -163,7 +177,7 @@ pub async fn install_node(on_progress: Option<Box<dyn Fn(u64, u64) + Send>>) -> 
         }
     }
     let final_dir = root.join(format!("node-{version}-{target}"));
-    if final_dir.join("bin").join(if cfg!(windows) { "node.exe" } else { "node" }).exists() {
+    if runtime_node_bin(&final_dir).is_some() {
         log(&format!("bundled node already present: {}", final_dir.display()));
         return Ok(version);
     }
@@ -218,7 +232,12 @@ pub async fn install_node(on_progress: Option<Box<dyn Fn(u64, u64) + Send>>) -> 
     let _ = std::fs::write(final_dir.join("installed.json"), serde_json::to_string_pretty(&manifest).unwrap_or_default());
 
     // Smoke test.
-    let bin = final_dir.join("bin").join(if cfg!(windows) { "node.exe" } else { "node" });
+    let Some(bin) = runtime_node_bin(&final_dir) else {
+        return Err(
+            "Node.js extraction finished but the node executable was not found in place."
+                .into(),
+        );
+    };
     match std::process::Command::new(&bin).arg("--version").output() {
         Ok(o) if o.status.success() => {
             let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
@@ -303,6 +322,25 @@ pub async fn install_dsh(
             node.display()
         ));
     }
+    // Test-run the chosen runtime before invoking npm — a node that exists
+    // but cannot execute (corrupt install, missing DLL, …) fails here with a
+    // clear message instead of a confusing npm error later.
+    match std::process::Command::new(node).arg("--version").output() {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => {
+            return Err(format!(
+                "Node.js at {} does not run (--version, exit {:?}).",
+                node.display(),
+                o.status
+            ));
+        }
+        Err(e) => {
+            return Err(format!(
+                "Node.js at {} cannot be executed: {e}",
+                node.display()
+            ));
+        }
+    }
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
     // Minimal package.json so npm treats this as a project root.
@@ -317,8 +355,12 @@ pub async fn install_dsh(
             .map_err(|e| e.to_string())?;
     }
 
-    let npm = npm_cli_for(node)
-        .ok_or_else(|| "Cannot locate npm for the selected Node runtime.".to_string())?;
+    let npm = npm_cli_for(node).ok_or_else(|| {
+        format!(
+            "Cannot locate npm for the selected Node runtime at {}.",
+            node.display()
+        )
+    })?;
 
     let mut cmd = tokio::process::Command::new(node);
     cmd.arg(&npm)
