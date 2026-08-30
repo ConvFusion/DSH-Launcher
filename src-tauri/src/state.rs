@@ -180,12 +180,14 @@ impl AppState {
                 n
             }
             None => {
-                let too_old = self.node_any().map(|n| n.version);
+                let too_old = self.node_any();
                 emit(EnvProgress::new(
                     "node",
                     match &too_old {
-                        Some(v) => format!(
-                            "Step 1/2: System Node.js v{v} is too old (need v{}) — downloading a bundled runtime…",
+                        Some(n) => format!(
+                            "Step 1/2: System Node.js v{} at {} is too old (need v{}) — downloading a bundled runtime…",
+                            n.version,
+                            n.path.display(),
                             runtime::detector::MIN_NODE_MAJOR
                         ),
                         None => "Step 1/2: No compatible Node.js found — downloading a bundled runtime…".into(),
