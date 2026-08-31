@@ -340,10 +340,14 @@ impl ProcessManager {
             .stderr(std::process::Stdio::piped());
         #[cfg(windows)]
         {
-            // Detach from any console; the child is a GUI service.
-            // (tokio::process::Command exposes creation_flags as an inherent
-            // method on Windows — no trait import needed.)
-            cmd.creation_flags(0x00000200 | 0x00000010); // DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            // The child is a headless GUI service: run it without a console.
+            // CREATE_NO_WINDOW keeps it out of a (new) console window — the
+            // parent is a GUI app — and CREATE_NEW_PROCESS_GROUP puts it in
+            // its own process group. The old code wrote 0x00000010 here,
+            // which is CREATE_NEW_CONSOLE, not DETACHED_PROCESS: it actively
+            // created the persistent node.exe console window.
+            use windows_sys::Win32::System::Threading::{CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW};
+            cmd.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
         }
 
         let mut child = match cmd.spawn() {
