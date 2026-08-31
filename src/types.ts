@@ -108,5 +108,5 @@ export interface EnvReport {
   error_details: string | null;
 }
 
-/** What the single home-page button is doing right now. */
-export type MainPhase = "installing" | "opening" | "updating";
+/** What the home-page buttons are doing right now. */
+export type MainPhase = "installing" | "opening" | "updating" | "starting" | "stopping" | "restarting";

@@ -43,15 +43,12 @@ export default function App() {
     refresh();
     const un1 = listen<LauncherStatus>("dsh://status", (e) => setStatus(e.payload));
     const un2 = listen<EnvProgress>("dsh://env", (e) => setEnvProgress(e.payload));
-    // The browser-chooser flow is gone: navigate events (if any) are ignored.
     return () => {
       un1.then((f) => f());
       un2.then((f) => f());
     };
   }, [refresh]);
 
-  // Latest published version + whether an update is available — detected
-  // from the npm registry (the version `npx @deepseek-ai/dsh` would install).
   const checkUpdate = useCallback(() => {
     api
       .checkDshUpdate()
@@ -63,13 +60,8 @@ export default function App() {
     checkUpdate();
   }, [checkUpdate]);
 
-  // Language lives in the backend config (survives restarts); when the
-  // status arrives we derive the provider's language from it.
   const lang = initialLanguage(status?.config.language ?? null);
 
-  // Apply the persisted theme to <html data-theme="...">. "system" (default)
-  // leaves the attribute unset so the CSS @media (prefers-color-scheme) rule
-  // follows the OS automatically.
   useEffect(() => {
     const theme = status?.config.theme ?? "system";
     const root = document.documentElement;
@@ -84,7 +76,7 @@ export default function App() {
     try {
       await api.updateConfig({ language: next });
     } catch {
-      /* best effort — the provider still switches locally */
+      /* best effort */
     }
   }, []);
 
@@ -154,16 +146,11 @@ function AppShell({
     );
   }
 
-  // The same "can open" decision drives both the button label (Home) and
-  // what a click does:
-  //  * service running OR installed → open (starts the service first if
-  //    needed, then opens the browser — never installs)
-  //  * not installed and not running → install everything (Node.js first,
-  //    then DSH), start, open
-  const currentStatus = status; // narrowed — safe to capture in closures
+  const currentStatus = status;
   const canOpen =
     currentStatus.process.state === "running" || currentStatus.env.ready;
 
+  // ---- Main action: install or open (existing logic) ----
   async function mainAction() {
     try {
       if (canOpen) {
@@ -186,9 +173,46 @@ function AppShell({
     }
   }
 
-  // Update: stop the running service first (Windows locks files in use),
-  // install the latest @deepseek-ai/dsh from npm — the same package that
-  // `npx @deepseek-ai/dsh web` fetches — then start it again.
+  // ---- Start service only (no browser) ----
+  async function startService() {
+    setBusyPhase("starting");
+    try {
+      await api.startDsh(false);
+      await refresh();
+    } catch (e) {
+      notify(String(e));
+    } finally {
+      setBusyPhase(null);
+    }
+  }
+
+  // ---- Stop service ----
+  async function stopService() {
+    setBusyPhase("stopping");
+    try {
+      await api.stopDsh();
+      await refresh();
+    } catch (e) {
+      notify(String(e));
+    } finally {
+      setBusyPhase(null);
+    }
+  }
+
+  // ---- Restart service ----
+  async function restartService() {
+    setBusyPhase("restarting");
+    try {
+      await api.restartDsh(false);
+      await refresh();
+    } catch (e) {
+      notify(String(e));
+    } finally {
+      setBusyPhase(null);
+    }
+  }
+
+  // ---- Update DSH ----
   async function updateDsh() {
     const wasRunning = currentStatus.process.state === "running";
     setBusyPhase("updating");
@@ -232,6 +256,9 @@ function AppShell({
             updateInfo={updateInfo}
             onMainAction={mainAction}
             onUpdate={updateDsh}
+            onStart={startService}
+            onStop={stopService}
+            onRestart={restartService}
           />
         )}
       </div>
