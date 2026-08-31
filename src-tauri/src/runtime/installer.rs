@@ -349,7 +349,7 @@ pub async fn install_dsh(
         let pkg = serde_json::json!({
             "name": "dsh-launcher-runtime",
             "private": true,
-            "version": "0.1.0"
+            "version": "0.1.1"
         });
         std::fs::write(&manifest, serde_json::to_string_pretty(&pkg).unwrap_or_default())
             .map_err(|e| e.to_string())?;

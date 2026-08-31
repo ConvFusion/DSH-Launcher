@@ -151,7 +151,7 @@ body {
   color: var(--text);
 }
 
-/* ---------- home: logo + one big button ---------- */
+/* ---------- home: logo + status + buttons ---------- */
 
 .home {
   flex: 1;
@@ -159,7 +159,7 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 26px;
+  gap: 18px;
   padding: 24px;
 }
 
@@ -170,6 +170,66 @@ body {
   box-shadow: 0 16px 44px var(--logo-glow);
 }
 
+/* Status line with colored dot */
+.home .status-dot {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.home .status-dot .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted-2);
+  flex: none;
+}
+
+.home .status-dot.status-running .dot {
+  background: var(--ok);
+  box-shadow: 0 0 8px var(--ok);
+  animation: pulse-dot 2s ease-in-out infinite;
+}
+
+.home .status-dot.status-starting .dot,
+.home .status-dot.status-stopping .dot {
+  background: var(--accent);
+  animation: pulse-dot 1s ease-in-out infinite;
+}
+
+.home .status-dot.status-error .dot {
+  background: #ff5c5c;
+  box-shadow: 0 0 8px rgba(255, 92, 92, 0.5);
+}
+
+.home .status-dot.status-running {
+  color: var(--ok);
+}
+
+.home .status-dot.status-starting,
+.home .status-dot.status-stopping {
+  color: var(--accent);
+}
+
+.home .status-dot.status-error {
+  color: #ff5c5c;
+}
+
+.home .status-hint {
+  color: var(--muted-2);
+  font-size: 11.5px;
+  font-weight: 400;
+  margin-left: 2px;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
 .home .progress {
   margin: 0;
   color: var(--muted);
@@ -177,6 +237,10 @@ body {
   text-align: center;
   max-width: 420px;
   line-height: 1.5;
+}
+
+.home .progress.error {
+  color: #ff5c5c;
 }
 
 /* The running URL under the Open button — click to copy. */
@@ -280,6 +344,36 @@ body {
 
 .btn.update:hover:not(:disabled) {
   background: var(--accent-soft);
+}
+
+/* Control buttons row (Start / Restart / Stop) */
+.controls {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+}
+
+.btn.ctrl {
+  padding: 8px 20px;
+  font-size: 13px;
+  border-radius: 10px;
+  background: var(--surface);
+  border-color: var(--border);
+}
+
+.btn.ctrl:hover:not(:disabled) {
+  background: var(--hover);
+  border-color: var(--accent-border);
+}
+
+.btn.ctrl.danger {
+  color: #ff5c5c;
+  border-color: rgba(255, 92, 92, 0.25);
+}
+
+.btn.ctrl.danger:hover:not(:disabled) {
+  background: rgba(255, 92, 92, 0.08);
+  border-color: rgba(255, 92, 92, 0.45);
 }
 
 .spinner {
