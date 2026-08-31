@@ -528,6 +528,64 @@ body {
   opacity: 0.7;
 }
 
+/* "Will run: <command>" preview under the input. */
+.plugin-willrun {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  margin: -4px 0 14px;
+  font-size: 11.5px;
+}
+
+.plugin-willrun .willrun-label {
+  flex: none;
+  color: var(--muted-2);
+}
+
+.plugin-willrun code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--muted);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* Supported-sources list under the title. */
+.plugin-desc-list {
+  margin: 0 0 10px;
+  padding-left: 18px;
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+
+/* "Installing…" banner shown while a plugin install is running. */
+.plugin-banner.busy {
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-border);
+  color: var(--accent);
+}
+
+.plugin-banner.busy .banner-sub {
+  color: var(--muted);
+}
+
+.plugin-banner .elapsed {
+  margin-left: 10px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+/* "Slow network, retrying…" warning banner. */
+.plugin-banner.warn {
+  background: rgba(245, 166, 35, 0.1);
+  border: 1px solid rgba(245, 166, 35, 0.4);
+  color: #d98a1f;
+  font-size: 12.5px;
+}
+
 .plugin-banner {
   display: flex;
   align-items: center;

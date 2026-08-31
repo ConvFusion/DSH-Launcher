@@ -502,64 +502,236 @@ pub async fn quit_app(state: State<'_, AppState>, app: AppHandle) -> Result<(), 
 // DSH plugins
 // ---------------------------------------------------------------------------
 
-/// Install a DSH plugin by name: runs
-/// `node <dsh>/lib/bin.js plugin --profile web add <name>` with the managed
-/// Node runtime and streams every output line to the UI (`dsh://plugin`).
+/// Characters that would be meaningful to a shell. Plugin commands are
+/// executed directly (never through a shell), so any of these in the input
+/// is rejected up front.
+fn plugin_input_forbidden(c: char) -> bool {
+    matches!(c, ';' | '|' | '&' | '<' | '>' | '$' | '`' | '\n' | '\r' | '"' | '\'')
+}
+
+/// Validate a bare plugin source and normalize it. Accepted forms:
 ///
-/// The plugin name goes straight into a command line, so it is validated
-/// strictly: npm-like package names only (letters, digits, `-`, `_`, `.`,
-/// `@`; scoped `@scope/name` or a single unscoped segment).
+/// * npm package name: `@scope/name` or `name`, optionally `@version`
+///   (e.g. `@rose43/dsh-file`, `dsh1024@latest`)
+/// * GitHub reference: `github:owner/repo` or `github:owner/repo#tag/branch`
+/// * local path: `/abs/path`, `~/path`, `./rel`, `C:\…`
+///
+/// A leading `~/` is expanded here because no shell will do it for us.
+fn normalize_plugin_source(input: &str) -> Result<String, String> {
+    if input.len() > 512 {
+        return Err("The plugin source is too long.".into());
+    }
+    if input.chars().any(plugin_input_forbidden) {
+        return Err(
+            "The plugin source contains characters that are not allowed (e.g. ; | & $ ` < > ' \")."
+                .into(),
+        );
+    }
+
+    // GitHub reference: github:owner/repo[#ref]
+    if let Some(rest) = input.strip_prefix("github:") {
+        let (repo, ref_part) = rest.split_once('#').unwrap_or((rest, ""));
+        let repo_ok = repo.split('/').count() == 2
+            && repo
+                .split('/')
+                .all(|seg| {
+                    !seg.is_empty()
+                        && seg
+                            .chars()
+                            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+                });
+        let ref_ok = ref_part.is_empty()
+            || ref_part
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'));
+        if repo_ok && ref_ok {
+            return Ok(input.to_string());
+        }
+        return Err(
+            "Invalid GitHub reference — use `github:owner/repo` or `github:owner/repo#tag`."
+                .into(),
+        );
+    }
+
+    // Local path: absolute, home-relative, or a Windows drive letter.
+    let b = input.as_bytes();
+    let is_path = input.starts_with('/')
+        || input.starts_with("~/")
+        || input.starts_with("./")
+        || input.starts_with("../")
+        || input.starts_with(".\\")
+        || input.starts_with("..\\")
+        || (b.len() >= 3 && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'));
+    if is_path {
+        if let Some(rest) = input.strip_prefix("~/") {
+            if let Some(home) = dirs::home_dir() {
+                return Ok(home.join(rest).to_string_lossy().to_string());
+            }
+        }
+        return Ok(input.to_string());
+    }
+
+    // npm package name, optionally suffixed with a version.
+    if !input.is_empty() && !input.starts_with('-') {
+        let body = input.strip_prefix('@').unwrap_or(input);
+        let seg = body.rsplit_once('@').map(|(l, _)| l).unwrap_or(body);
+        let shape_ok = if input.starts_with('@') {
+            // Scoped: exactly scope/name.
+            seg.split('/').count() == 2 && !seg[1..].starts_with('/') && !seg[1..].is_empty()
+        } else {
+            !seg.contains('/')
+        };
+        let name_ok = shape_ok
+            && !seg.is_empty()
+            && seg
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'));
+        let all_ok = body
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | '@'));
+        if name_ok && all_ok {
+            return Ok(input.to_string());
+        }
+    }
+
+    Err(
+        "Invalid plugin source. Use an npm package name (e.g. @rose43/dsh-file), a GitHub reference (github:owner/repo[#tag]) or a local path."
+            .into(),
+    )
+}
+
+/// Build the argument vector for npx from the user's input.
+///
+/// * Input starting with `npx …` → a complete command, used **as-is**
+///   (it must still target `@deepseek-ai/dsh` and stay shell-safe).
+/// * Anything else → a bare plugin source, wrapped into the standard:
+///   `npx -y --package @deepseek-ai/dsh dsh plugin --profile web add <source>`
+fn plugin_npx_args(input: &str) -> Result<Vec<String>, String> {
+    // "npx" followed by a space (or alone) → a full command, not an
+    // npm package name that happens to start with "npx".
+    if input == "npx" || input.starts_with("npx ") {
+        if input.chars().any(plugin_input_forbidden) {
+            return Err(
+                "The command contains characters that are not allowed (e.g. ; | & $ ` < > ' \")."
+                    .into(),
+            );
+        }
+        let tokens: Vec<String> = input.split_whitespace().map(str::to_string).collect();
+        if tokens.len() < 2 {
+            return Err("The npx command is missing arguments.".into());
+        }
+        if !input.contains("@deepseek-ai/dsh") {
+            return Err(
+                "The command must target the @deepseek-ai/dsh package, e.g. `npx -y --package @deepseek-ai/dsh dsh plugin --profile web add …`."
+                    .into(),
+            );
+        }
+        return Ok(tokens[1..].to_vec());
+    }
+    let source = normalize_plugin_source(input)?;
+    Ok(vec![
+        "-y".to_string(),
+        "--package".to_string(),
+        "@deepseek-ai/dsh".to_string(),
+        "dsh".to_string(),
+        "plugin".to_string(),
+        "--profile".to_string(),
+        "web".to_string(),
+        "add".to_string(),
+        source,
+    ])
+}
+
+/// Install a DSH plugin. Runs the (validated) command through the managed
+/// Node runtime's npx — `node npx-cli.js <args>` — so it works identically
+/// on macOS and Windows without a shell, and streams every output line to
+/// the UI (`dsh://plugin`). See [`plugin_npx_args`] for the two supported
+/// input forms.
+///
+/// A failed attempt (non-zero exit, e.g. a flaky GitHub download) is
+/// retried once; the retry is announced in the log stream so the UI can
+/// tell the user the work is still in progress.
 #[tauri::command]
 pub async fn install_dsh_plugin(
     state: State<'_, AppState>,
     app: AppHandle,
     name: String,
 ) -> Result<String, String> {
-    let name = name.trim().to_string();
-
-    let valid_chars = name
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@'));
-    let valid_shape = if name.starts_with('@') {
-        // Scoped: @scope/name
-        name.len() > 3 && name[1..].contains('/')
-    } else {
-        // Unscoped: single segment, must not start with '-'
-        !name.is_empty() && !name.starts_with('-') && !name.contains('/')
-    };
-    if name.len() > 256 || !valid_chars || !valid_shape {
-        return Err(format!(
-            "Invalid plugin name “{name}”. Use an npm package name such as @scope/name."
-        ));
+    let input = name.trim().to_string();
+    if input.is_empty() {
+        return Err("Please enter a plugin name or a full npx command.".into());
     }
+    let npx_args = plugin_npx_args(&input)?;
 
-    let (node, dsh) = match (state.node(), state.dsh()) {
-        (Some(n), Some(d)) => (n, d),
-        _ => {
-            return Err(
-                "DeepSeek Harness is not installed yet — install it first, then add plugins."
-                    .into(),
+    let node = state
+        .node()
+        .ok_or("No compatible Node.js runtime is available — install DeepSeek Harness first.")?;
+    let npx_cli = crate::runtime::detector::npx_cli_for(&node.path).ok_or_else(|| {
+        format!(
+            "Cannot locate npx for the Node runtime at {}.",
+            node.path.display()
+        )
+    })?;
+
+    log(&format!(
+        "plugin command: {} {}",
+        npx_cli.display(),
+        npx_args.join(" ")
+    ));
+
+    const MAX_ATTEMPTS: u32 = 2;
+    let mut last_exit: Option<i32> = None;
+
+    for attempt in 1..=MAX_ATTEMPTS {
+        if attempt > 1 {
+            log(&format!(
+                "plugin command: retrying (attempt {attempt}/{MAX_ATTEMPTS})"
+            ));
+            let _ = app.emit(
+                "dsh://plugin",
+                format!(
+                    "[launcher] previous attempt failed (exit {}), retrying ({attempt}/{MAX_ATTEMPTS})…",
+                    last_exit.unwrap_or(-1)
+                ),
             );
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
-    };
-    let bin_js = dsh
-        .path
-        .join("node_modules")
-        .join("@deepseek-ai/dsh")
-        .join("lib")
-        .join("bin.js");
-    if !bin_js.exists() {
-        return Err("DeepSeek Harness entry point not found.".into());
+
+        match run_plugin_once(&node, &npx_cli, &npx_args, &app, &input).await {
+            PluginRun::Success => return Ok(input),
+            PluginRun::FailedExit(code) => {
+                last_exit = code;
+            }
+            PluginRun::Fatal(e) => return Err(e),
+        }
     }
 
-    log(&format!("plugin install: {name}"));
+    Err(format!(
+        "The plugin install failed after {MAX_ATTEMPTS} attempts (exit code {:?}) — see the log above.",
+        last_exit
+    ))
+}
+
+/// Outcome of one plugin command run.
+enum PluginRun {
+    Success,
+    /// Process exited non-zero — worth a retry (often a flaky download).
+    FailedExit(Option<i32>),
+    /// Spawn/wait/timeout failure — retrying won't help.
+    Fatal(String),
+}
+
+/// Run the plugin command once, streaming stdout/stderr to the UI, and
+/// classify the outcome.
+async fn run_plugin_once(
+    node: &crate::runtime::NodeInfo,
+    npx_cli: &std::path::Path,
+    npx_args: &[String],
+    app: &AppHandle,
+    input: &str,
+) -> PluginRun {
     let mut cmd = tokio::process::Command::new(&node.path);
-    cmd.arg(&bin_js)
-        .arg("plugin")
-        .arg("--profile")
-        .arg("web")
-        .arg("add")
-        .arg(&name);
+    cmd.arg(npx_cli).args(npx_args);
     let node_dir = node
         .path
         .parent()
@@ -572,21 +744,22 @@ pub async fn install_dsh_plugin(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Could not start the plugin install: {e}"))?;
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return PluginRun::Fatal(format!("Could not start the plugin command: {e}")),
+    };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
     // Stream both pipes to the UI.
     if let Some(out) = stdout {
         let app = app.clone();
-        let name_log = name.clone();
+        let input_log = input.to_string();
         tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
             let mut lines = tokio::io::BufReader::new(out).lines();
             while let Ok(Some(line)) = lines.next_line().await {
-                log(&format!("[plugin:{name_log}] {line}"));
+                log(&format!("[plugin:{input_log}] {line}"));
                 let _ = app.emit("dsh://plugin", line);
             }
         });
@@ -602,21 +775,29 @@ pub async fn install_dsh_plugin(
         });
     }
 
-    let status = tokio::time::timeout(std::time::Duration::from_secs(300), child.wait())
+    // 10 minutes per attempt: a fresh npx download plus a GitHub tarball
+    // can be slow on a poor connection.
+    let status = match tokio::time::timeout(std::time::Duration::from_secs(600), child.wait())
         .await
-        .map_err(|_| "The plugin install timed out after 5 minutes.".to_string())?
-        .map_err(|e| format!("The plugin install failed to run: {e}"))?;
+    {
+        Err(_) => {
+            return PluginRun::Fatal(
+                "The plugin install timed out after 10 minutes.".to_string(),
+            )
+        }
+        Ok(Err(e)) => {
+            return PluginRun::Fatal(format!("The plugin command failed to run: {e}"))
+        }
+        Ok(Ok(s)) => s,
+    };
 
     // Give the last output lines a moment to reach the UI before reporting.
     tokio::time::sleep(std::time::Duration::from_millis(300)).await;
 
     if status.success() {
-        Ok(name)
+        PluginRun::Success
     } else {
-        Err(format!(
-            "The plugin install failed (exit code {:?}) — see the log above.",
-            status.code()
-        ))
+        PluginRun::FailedExit(status.code())
     }
 }
 
@@ -627,4 +808,104 @@ pub async fn install_dsh_plugin(
 #[tauri::command]
 pub fn suggest_ports(preferred: u16) -> Vec<u16> {
     health::suggest_ports(preferred, 3)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args_ok(input: &str) -> Vec<String> {
+        plugin_npx_args(input).unwrap_or_else(|e| panic!("{input:?} rejected: {e}"))
+    }
+
+    fn args_err(input: &str) -> String {
+        plugin_npx_args(input).unwrap_err()
+    }
+
+    #[test]
+    fn npm_names_get_standard_wrapper() {
+        for name in ["@rose43/dsh-file", "dsh1024@latest", "dsh-file"] {
+            let args = args_ok(name);
+            assert!(args.starts_with(&[
+                "-y".to_string(),
+                "--package".to_string(),
+                "@deepseek-ai/dsh".to_string(),
+                "dsh".to_string(),
+                "plugin".to_string(),
+                "--profile".to_string(),
+                "web".to_string(),
+                "add".to_string(),
+            ]), "{name}: {args:?}");
+            assert_eq!(args.last().unwrap(), name, "{name}: {args:?}");
+        }
+    }
+
+    #[test]
+    fn github_references_are_accepted() {
+        for ref_name in [
+            "github:LoftyTao/dsh-ui-workbench#v0.3.0",
+            "github:dcrzsy/dsh-enhance-tool",
+            "github:owner/repo#feature/branch",
+        ] {
+            let args = args_ok(ref_name);
+            assert_eq!(args.last().unwrap(), ref_name);
+        }
+        // Missing the owner/repo split, or extra segments, is invalid.
+        args_err("github:onlyowner");
+        args_err("github:a/b/c");
+        args_err("github:owner/");
+    }
+
+    #[test]
+    fn local_paths_are_accepted_and_home_expanded() {
+        let args = args_ok("/Users/foo/plugins/my-plugin");
+        assert_eq!(args.last().unwrap(), "/Users/foo/plugins/my-plugin");
+
+        if let Some(home) = dirs::home_dir() {
+            let args = args_ok("~/my-plugin");
+            assert_eq!(args.last().unwrap(), &home.join("my-plugin").to_string_lossy());
+        }
+    }
+
+    #[test]
+    fn shell_metacharacters_are_rejected() {
+        for bad in [
+            "foo; rm -rf /",
+            "foo | bar",
+            "$(reboot)",
+            "foo && bar",
+            "foo > out",
+            "foo `id`",
+            "foo\nbar",
+            "foo'bar",
+            "foo\"bar",
+        ] {
+            let _ = args_err(bad);
+        }
+    }
+
+    #[test]
+    fn full_npx_commands_run_as_is() {
+        let input = "npx -y --package @deepseek-ai/dsh dsh plugin --profile web add github:LoftyTao/dsh-ui-workbench#v0.3.0";
+        let args = args_ok(input);
+        let expected: Vec<String> = input
+            .split_whitespace()
+            .skip(1)
+            .map(str::to_string)
+            .collect();
+        assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn full_npx_commands_must_target_dsh() {
+        args_err("npx -y --package some-other-pkg do stuff");
+        args_err("npx");
+        args_err("npx ");
+    }
+
+    #[test]
+    fn npm_names_starting_with_npx_are_not_commands() {
+        let args = args_ok("npx-tools");
+        assert_eq!(args.last().unwrap(), "npx-tools");
+    }
 }
