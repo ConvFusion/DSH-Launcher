@@ -12,6 +12,7 @@ export const api = {
   ensureEnvironment: () => invoke<EnvReport>("ensure_environment"),
   checkDshUpdate: () => invoke<UpdateInfo>("check_dsh_update"),
   installDsh: () => invoke<string>("install_dsh_package"),
+  installPlugin: (name: string) => invoke<string>("install_dsh_plugin", { name }),
 
   startDsh: (openBrowser?: boolean) => invoke("start_dsh", { openBrowser }),
   stopDsh: () => invoke<void>("stop_dsh"),
