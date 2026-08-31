@@ -1,0 +1,9 @@
+# Cross-compiling the Windows target from macOS links the prebuilt MSVC CRT
+# libraries (libcmt.lib / libvcruntime.lib) with lld-link. Those .obj files
+# embed the absolute PDB path of Microsoft's own CI build machine (e.g.
+# D:\a\_work\1\s\binaries\amd64ret\lib\amd64\libcmt.amd64.pdb), which does not
+# exist anywhere else. lld-link reports LNK4099 ("Cannot use debug info") for
+# each of them — a harmless warning that only means those system libraries have
+# no debug symbols; the resulting .exe is unaffected. /ignore:4099 silences it.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/ignore:4099"]
