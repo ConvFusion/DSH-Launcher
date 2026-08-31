@@ -237,22 +237,24 @@ function AppShell({
 
   return (
     <div className="app">
-      <button
-        className="gear plugin"
-        aria-label={inPlugins ? t("app.close_plugins") : t("app.plugins")}
-        title={inPlugins ? t("app.close_plugins") : t("app.plugins")}
-        onClick={() => setView(inPlugins ? "home" : "plugins")}
-      >
-        {inPlugins ? "←" : "🧩"}
-      </button>
-      <button
-        className="gear"
-        aria-label={inSettings ? t("app.close_settings") : t("app.settings")}
-        title={inSettings ? t("app.close_settings") : t("app.settings")}
-        onClick={() => setView(inSettings ? "home" : "settings")}
-      >
-        {inSettings ? "←" : "⚙︎"}
-      </button>
+      <div className="topbar">
+        <button
+          className={`icon-btn plugin${inPlugins ? " active" : ""}`}
+          aria-label={inPlugins ? t("app.close_plugins") : t("app.plugins")}
+          title={inPlugins ? t("app.close_plugins") : t("app.plugins")}
+          onClick={() => setView(inPlugins ? "home" : "plugins")}
+        >
+          {inPlugins ? "←" : "🧩"}
+        </button>
+        <button
+          className={`icon-btn${inSettings ? " active" : ""}`}
+          aria-label={inSettings ? t("app.close_settings") : t("app.settings")}
+          title={inSettings ? t("app.close_settings") : t("app.settings")}
+          onClick={() => setView(inSettings ? "home" : "settings")}
+        >
+          {inSettings ? "←" : "⚙︎"}
+        </button>
+      </div>
 
       <div className="main">
         {inSettings ? (

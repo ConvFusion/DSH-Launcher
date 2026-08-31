@@ -124,13 +124,18 @@ body {
   flex-direction: column;
 }
 
-/* ---------- settings entry (small gear, top-right) ---------- */
+/* ---------- top-right icon buttons (plugins + settings) ---------- */
 
-.gear {
+.topbar {
   position: absolute;
   top: 14px;
   right: 16px;
   z-index: 10;
+  display: flex;
+  gap: 6px;
+}
+
+.icon-btn {
   width: 42px;
   height: 42px;
   display: flex;
@@ -140,21 +145,27 @@ body {
   border: 1px solid transparent;
   background: none;
   color: var(--muted);
-  font-size: 23px;
+  font-size: 22px;
   line-height: 1;
   cursor: pointer;
   transition: background 0.15s ease, color 0.15s ease;
 }
 
-.gear:hover {
+.icon-btn:hover {
   background: var(--surface-2);
   color: var(--text);
 }
 
-/* Plugin icon button — sits to the left of the gear. */
-.gear.plugin {
-  right: 66px;
-  font-size: 21px;
+.icon-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-color: var(--accent-border);
+}
+
+/* Puzzle-piece emoji renders slightly larger than the gear glyph; keep the
+   box the same and only shrink the glyph so both look the same size. */
+.icon-btn.plugin {
+  font-size: 19px;
 }
 
 /* ---------- home: logo + status + buttons ---------- */
