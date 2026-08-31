@@ -10,11 +10,12 @@ import { api } from "./api";
 import Logo from "./components/Logo";
 import Home from "./pages/Home";
 import Settings from "./pages/Settings";
+import Plugins from "./pages/Plugins";
 import { I18nProvider, initialLanguage, useI18n } from "./i18n";
 import type { Language } from "./i18n/messages";
 import "./styles.css";
 
-type View = "home" | "settings";
+type View = "home" | "settings" | "plugins";
 
 export default function App() {
   const [status, setStatus] = useState<LauncherStatus | null>(null);
@@ -232,9 +233,18 @@ function AppShell({
   }
 
   const inSettings = view === "settings";
+  const inPlugins = view === "plugins";
 
   return (
     <div className="app">
+      <button
+        className="gear plugin"
+        aria-label={inPlugins ? t("app.close_plugins") : t("app.plugins")}
+        title={inPlugins ? t("app.close_plugins") : t("app.plugins")}
+        onClick={() => setView(inPlugins ? "home" : "plugins")}
+      >
+        {inPlugins ? "←" : "🧩"}
+      </button>
       <button
         className="gear"
         aria-label={inSettings ? t("app.close_settings") : t("app.settings")}
@@ -247,6 +257,8 @@ function AppShell({
       <div className="main">
         {inSettings ? (
           <Settings status={status} notify={notify} onChanged={refresh} />
+        ) : inPlugins ? (
+          <Plugins notify={notify} onChanged={refresh} />
         ) : (
           <Home
             status={status}

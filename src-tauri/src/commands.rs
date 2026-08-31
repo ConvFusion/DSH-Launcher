@@ -499,6 +499,128 @@ pub async fn quit_app(state: State<'_, AppState>, app: AppHandle) -> Result<(), 
 }
 
 // ---------------------------------------------------------------------------
+// DSH plugins
+// ---------------------------------------------------------------------------
+
+/// Install a DSH plugin by name: runs
+/// `node <dsh>/lib/bin.js plugin --profile web add <name>` with the managed
+/// Node runtime and streams every output line to the UI (`dsh://plugin`).
+///
+/// The plugin name goes straight into a command line, so it is validated
+/// strictly: npm-like package names only (letters, digits, `-`, `_`, `.`,
+/// `@`; scoped `@scope/name` or a single unscoped segment).
+#[tauri::command]
+pub async fn install_dsh_plugin(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    name: String,
+) -> Result<String, String> {
+    let name = name.trim().to_string();
+
+    let valid_chars = name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '@'));
+    let valid_shape = if name.starts_with('@') {
+        // Scoped: @scope/name
+        name.len() > 3 && name[1..].contains('/')
+    } else {
+        // Unscoped: single segment, must not start with '-'
+        !name.is_empty() && !name.starts_with('-') && !name.contains('/')
+    };
+    if name.len() > 256 || !valid_chars || !valid_shape {
+        return Err(format!(
+            "Invalid plugin name “{name}”. Use an npm package name such as @scope/name."
+        ));
+    }
+
+    let (node, dsh) = match (state.node(), state.dsh()) {
+        (Some(n), Some(d)) => (n, d),
+        _ => {
+            return Err(
+                "DeepSeek Harness is not installed yet — install it first, then add plugins."
+                    .into(),
+            );
+        }
+    };
+    let bin_js = dsh
+        .path
+        .join("node_modules")
+        .join("@deepseek-ai/dsh")
+        .join("lib")
+        .join("bin.js");
+    if !bin_js.exists() {
+        return Err("DeepSeek Harness entry point not found.".into());
+    }
+
+    log(&format!("plugin install: {name}"));
+    let mut cmd = tokio::process::Command::new(&node.path);
+    cmd.arg(&bin_js)
+        .arg("plugin")
+        .arg("--profile")
+        .arg("web")
+        .arg("add")
+        .arg(&name);
+    let node_dir = node
+        .path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    cmd.env("PATH", format!("{}{}{old_path}", node_dir.display(), sep));
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Could not start the plugin install: {e}"))?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    // Stream both pipes to the UI.
+    if let Some(out) = stdout {
+        let app = app.clone();
+        let name_log = name.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = tokio::io::BufReader::new(out).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                log(&format!("[plugin:{name_log}] {line}"));
+                let _ = app.emit("dsh://plugin", line);
+            }
+        });
+    }
+    if let Some(err) = stderr {
+        let app = app.clone();
+        tokio::spawn(async move {
+            use tokio::io::AsyncBufReadExt;
+            let mut lines = tokio::io::BufReader::new(err).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let _ = app.emit("dsh://plugin", line);
+            }
+        });
+    }
+
+    let status = tokio::time::timeout(std::time::Duration::from_secs(300), child.wait())
+        .await
+        .map_err(|_| "The plugin install timed out after 5 minutes.".to_string())?
+        .map_err(|e| format!("The plugin install failed to run: {e}"))?;
+
+    // Give the last output lines a moment to reach the UI before reporting.
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    if status.success() {
+        Ok(name)
+    } else {
+        Err(format!(
+            "The plugin install failed (exit code {:?}) — see the log above.",
+            status.code()
+        ))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Port helper for the "Use another port" flow
 // ---------------------------------------------------------------------------
 
