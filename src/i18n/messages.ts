@@ -39,10 +39,20 @@ const en = {
 
   // Plugins
   "plugins.title": "Install Plugin",
-  "plugins.desc":
-    "Enter a plugin name and click Install — the command runs for you. After installing, restart DSH to activate the plugin.",
-  "plugins.placeholder": "e.g. @rose43/dsh-file",
+  "plugins.desc": "Install a plugin from one of the following:",
+  "plugins.desc_npm": "npm package name, e.g. @rose43/dsh-file or dsh1024@latest",
+  "plugins.desc_github": "GitHub repository, e.g. github:owner/repo#v0.1.0",
+  "plugins.desc_path": "local path, e.g. /path/to/plugin or ~/my-plugin",
+  "plugins.desc_npx": "or paste a full npx command — it runs as-is",
+  "plugins.desc_restart": "After installing, restart DSH to activate the plugin.",
+  "plugins.placeholder": "plugin name / github:owner/repo#tag / local path / full npx command",
+  "plugins.will_run": "Will run",
   "plugins.install": "Install",
+  "plugins.installing": "Installing plugin…",
+  "plugins.installing_hint":
+    "Downloads from GitHub can be slow. Retry messages in the log are normal — please wait and keep the app open.",
+  "plugins.retry_hint": "Slow network — the download is retrying automatically and is still in progress. Please keep the app open.",
+  "plugins.waiting": "Waiting for command output…",
   "plugins.restart_hint_title": "Plugin installed",
   "plugins.restart_hint_sub": "Restart DeepSeek Harness to make it take effect.",
   "plugins.restart_now": "Restart now",
@@ -102,9 +112,20 @@ const zh: Record<MessageKey, string> = {
 
   // Plugins
   "plugins.title": "安装插件",
-  "plugins.desc": "输入插件名称后点击安装，命令会自动执行。安装完成后请重启 DSH 以启用插件。",
-  "plugins.placeholder": "例如 @rose43/dsh-file",
+  "plugins.desc": "支持以下插件来源：",
+  "plugins.desc_npm": "npm 包名，如 @rose43/dsh-file 或 dsh1024@latest",
+  "plugins.desc_github": "GitHub 仓库，如 github:owner/repo#v0.1.0",
+  "plugins.desc_path": "本地路径，如 /path/to/plugin 或 ~/my-plugin",
+  "plugins.desc_npx": "或直接粘贴以 npx 开头的完整命令（原样执行）",
+  "plugins.desc_restart": "安装完成后请重启 DSH 以启用插件。",
+  "plugins.placeholder": "插件包名 / github:owner/repo#tag / 本地路径 / 完整 npx 命令",
+  "plugins.will_run": "将执行",
   "plugins.install": "安装",
+  "plugins.installing": "正在安装插件…",
+  "plugins.installing_hint":
+    "GitHub 来源下载可能较慢，日志中出现重试提示属正常现象，请耐心等待并保留程序开启。",
+  "plugins.retry_hint": "检测到网络重试，下载仍在进行中，请勿关闭程序。",
+  "plugins.waiting": "等待命令输出…",
   "plugins.restart_hint_title": "插件已安装",
   "plugins.restart_hint_sub": "重启 DeepSeek Harness 后生效。",
   "plugins.restart_now": "立即重启",

@@ -714,6 +714,25 @@ pub fn npm_cli_for(node: &Path) -> Option<PathBuf> {
     candidates.iter().find(|c| c.exists()).map(|c| c.to_path_buf())
 }
 
+/// Same layout as [`npm_cli_for`] but for npx: `npx-cli.js` lives right next
+/// to `npm-cli.js`. Running the plugin command as `node npx-cli.js …` keeps
+/// it shell-free on every platform (Windows' `npx.cmd` would require
+/// `cmd /c`, which re-introduces shell parsing).
+pub fn npx_cli_for(node: &Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(node).unwrap_or_else(|_| node.to_path_buf());
+    let dir = real.parent()?;
+    let candidates = [
+        dir.join("node_modules").join("npm").join("bin").join("npx-cli.js"),
+        dir.join("..")
+            .join("lib")
+            .join("node_modules")
+            .join("npm")
+            .join("bin")
+            .join("npx-cli.js"),
+    ];
+    candidates.iter().find(|c| c.exists()).map(|c| c.to_path_buf())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
