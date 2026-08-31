@@ -162,12 +162,6 @@ body {
   border-color: var(--accent-border);
 }
 
-/* Puzzle-piece emoji renders slightly larger than the gear glyph; keep the
-   box the same and only shrink the glyph so both look the same size. */
-.icon-btn.plugin {
-  font-size: 19px;
-}
-
 /* ---------- home: logo + status + buttons ---------- */
 
 .home {
