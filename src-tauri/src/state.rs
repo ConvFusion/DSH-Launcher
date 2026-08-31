@@ -27,12 +27,20 @@ struct EnvCache {
 
 impl EnvCache {
     fn fresh() -> Self {
-        let now = Instant::now();
+        // Timestamps start already-expired so the first read of every field
+        // performs a real detection instead of returning the placeholder
+        // below. A placeholder cached under a *fresh* timestamp is
+        // indistinguishable from a real "nothing found": it made the first
+        // ENV_CACHE_TTL seconds after launch misreport a compatible Node as
+        // "too old", and failed the post-install verification the same way.
+        let expired = Instant::now()
+            .checked_sub(ENV_CACHE_TTL + std::time::Duration::from_secs(1))
+            .unwrap_or_else(Instant::now);
         Self {
-            node: (now, None),
-            dsh: (now, None),
-            browsers: (now, Vec::new()),
-            default: (now, None),
+            node: (expired, None),
+            dsh: (expired, None),
+            browsers: (expired, Vec::new()),
+            default: (expired, None),
         }
     }
 
