@@ -7,11 +7,19 @@
 //! 3. Well-known install locations per platform (Homebrew, nvm, fnm, volta,
 //!    asdf, mise, MacPorts, nvm-windows, scoop, registry App Paths, …)
 //!
+//! The detection is deliberately **command-driven, not path-hardcoded**:
+//! instead of only trusting the launcher process's own environment (which a
+//! GUI app launched from Finder/Dock/Start menu gets as a *minimal* PATH),
+//! we ask the user's login shell for its effective `PATH` and also run
+//! `which`/`command -v` against that environment. Whatever `node`/`dsh`
+//! resolves there — a custom `/opt/…` prefix, nvm/fnm/volta shims, Homebrew —
+//! is a valid candidate. The hardcoded list below is only a last-resort
+//! fallback for machines where no shell answers quickly.
+//!
 //! **All** candidates from **all** sources are collected and the highest
-//! version wins. This matters because apps launched from the Finder/Dock
-//! get a minimal PATH: the first `node` on PATH (e.g. a stale v18 left in
-//! `/usr/local/bin`) must never shadow a newer v22/v24 installed via nvm or
-//! Homebrew. Anything older than Node 20 is considered incompatible.
+//! version wins. This matters because a stale v18 left in `/usr/local/bin`
+//! must never shadow a newer v22/v24 installed via nvm or Homebrew. Anything
+//! older than Node 20 is considered incompatible.
 
 use super::{DshInfo, NodeInfo, NodeSource};
 use crate::config::{dsh_dir, log, runtime_dir};
@@ -19,6 +27,11 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+#[cfg(not(windows))]
+use std::time::{Duration, Instant};
+
+#[cfg(not(windows))]
+use std::io::Read;
 
 /// Minimum Node major version supported by DeepSeek Harness.
 pub const MIN_NODE_MAJOR: u32 = 20;
@@ -64,12 +77,30 @@ fn all_node_candidates() -> Vec<NodeInfo> {
         }
     }
 
-    // 2. Every `node` on PATH — not just the first one.
-    if let Ok(path_var) = std::env::var("PATH") {
-        let name = if cfg!(windows) { "node.exe" } else { "node" };
-        for dir in std::env::split_paths(&path_var) {
-            add(&dir.join(name), NodeSource::System);
+    // 2. `node` on PATH — the launcher process's own PATH, the user's
+    //    login-shell PATH (GUI apps get a minimal PATH from the OS, so custom
+    //    install prefixes like /opt/… only appear once the user's profile is
+    //    sourced), and `which node`/`command -v node` resolution. Detection is
+    //    command-driven — it must not depend on a hardcoded list of paths.
+    let name = if cfg!(windows) { "node.exe" } else { "node" };
+    #[cfg(not(windows))]
+    {
+        for p in shell_resolve_all(name) {
+            add(&p, NodeSource::System);
         }
+    }
+    let mut dirs: Vec<PathBuf> = Vec::new();
+    if let Ok(path_var) = std::env::var("PATH") {
+        dirs.extend(std::env::split_paths(&path_var));
+    }
+    #[cfg(not(windows))]
+    dirs.extend(shell_path_entries());
+    let mut seen_dirs: HashSet<PathBuf> = HashSet::new();
+    for dir in dirs {
+        if !seen_dirs.insert(dir.clone()) {
+            continue;
+        }
+        add(&dir.join(name), NodeSource::System);
     }
 
     // 3. Well-known install locations.
@@ -111,7 +142,8 @@ pub fn detect_node() -> Option<NodeInfo> {
                 MIN_NODE_MAJOR
             )),
             None => log(&format!(
-                "node detection failed: no Node.js found on PATH ({}) or in any known location",
+                "node detection failed: no Node.js found on the launcher PATH, \
+                 the login-shell PATH, or in any known location (PATH={})",
                 std::env::var("PATH").unwrap_or_default()
             )),
         }
@@ -150,6 +182,138 @@ fn check_candidate(path: &Path, source: NodeSource) -> Option<NodeInfo> {
         version,
         source,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Shell-driven discovery
+// ---------------------------------------------------------------------------
+//
+// The launcher is a GUI app: launched from the Finder/Dock/Start menu it gets
+// a *minimal* PATH from the OS that does not include the user's shell setup.
+// Instead of guessing install locations, we ask the user's login shell for its
+// effective environment and resolve executables with `which`/`command -v`.
+// Whatever `node`/`dsh` resolves there — a custom /opt/… prefix, nvm/fnm/volta
+// shims, Homebrew — is a valid candidate. The hardcoded `known_node_paths`
+// list below is only a last-resort fallback.
+
+/// Run `shell -lc "<script>"` and return its stdout (banner lines included;
+/// parse with a marker). A short timeout keeps a slow or non-interactive
+/// shell profile from stalling detection.
+#[cfg(not(windows))]
+fn shell_stdout(shell: &str, script: &str) -> Option<String> {
+    use std::process::Stdio;
+    let mut child = Command::new(shell)
+        .args(["-lc", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let deadline = Instant::now() + Duration::from_secs(4);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) => return None,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => return None,
+        }
+    }
+    let mut buf = Vec::new();
+    let _ = child.stdout.take()?.read_to_end(&mut buf);
+    let _ = child.wait();
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
+/// Resolve every `name` executable (e.g. `node`, `dsh`) the way the user's
+/// shell does: `whence -a` (zsh) / `type -a` / `command -v` / `which` on
+/// Unix. Returns absolute paths, deduplicated. Never relies on a hardcoded
+/// path list.
+#[cfg(not(windows))]
+fn shell_resolve_all(name: &str) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    // A login shell sources the user's profile, exposing custom PATH entries.
+    // `command -v` prints one; `type -a`/`whence -a`/`which -a` print every
+    // match on its own line. The marker separates tool output from any
+    // banner the profile prints (conda, mamba, …).
+    let script = format!(
+        "printf '%s\\n' '__DSH_RESOLVE__'; \
+         command -v -a {name} 2>/dev/null; \
+         type -a {name} 2>/dev/null; \
+         whence -a {name} 2>/dev/null; \
+         which -a {name} 2>/dev/null"
+    );
+    for shell in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+        let Some(out_text) = shell_stdout(shell, &script) else {
+            continue;
+        };
+        for line in out_text.lines() {
+            let line = line.trim();
+            // Skip the marker and anything before it (banners).
+            if line == "__DSH_RESOLVE__" {
+                continue;
+            }
+            // `type -a` may print "node is /path" or "node is hashed (/path)";
+            // keep only real paths ending in /<name>.
+            let path = line
+                .strip_prefix(&format!("{name} is "))
+                .unwrap_or(line)
+                .trim();
+            let p = PathBuf::from(path);
+            if p.is_absolute()
+                && p.file_name().map(|f| f == name).unwrap_or(false)
+                && seen.insert(p.clone())
+            {
+                out.push(p);
+            }
+        }
+        if !out.is_empty() {
+            break;
+        }
+    }
+    out
+}
+
+/// The user's effective `PATH` as a login shell sees it (Unix). This finds
+/// custom install prefixes (e.g. `/opt/…/bin`) that the GUI app's minimal
+/// PATH cannot see. Banner output is ignored via a marker.
+#[cfg(not(windows))]
+fn shell_path_entries() -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let script = "printf '%s\\n' '__DSH_PATH__'; printf '%s\\n' \"$PATH\"";
+    for shell in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+        let Some(text) = shell_stdout(shell, script) else {
+            continue;
+        };
+        let mut capture = false;
+        for line in text.lines() {
+            let line = line.trim();
+            if line == "__DSH_PATH__" {
+                capture = true;
+                continue;
+            }
+            if capture && !line.is_empty() {
+                for p in std::env::split_paths(line) {
+                    if seen.insert(p.clone()) {
+                        out.push(p);
+                    }
+                }
+                break;
+            }
+        }
+        if !out.is_empty() {
+            break;
+        }
+    }
+    out
 }
 
 /// Well-known Node.js install locations, per platform. Apps launched from
@@ -315,13 +479,11 @@ fn registry_app_path(exe: &str) -> Option<PathBuf> {
 }
 
 fn fs_read_dir(p: &Path) -> std::io::Result<Vec<PathBuf>> {
-    std::fs::read_dir(p)
-        .map(|rd| {
-            rd.filter_map(|e| e.ok().map(|e| e.path()))
-                .filter(|p| p.is_dir())
-                .collect()
-        })
-        .map_err(|e| e)
+    std::fs::read_dir(p).map(|rd| {
+        rd.filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.is_dir())
+            .collect()
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -411,37 +573,52 @@ fn detect_managed_dsh() -> Option<DshInfo> {
     detect_dsh_in(&dsh_install_dir())
 }
 
-/// A `dsh` binary found on PATH (global npm, npx cache, …). Resolves
-/// symlinks so we reach the real package directory.
+/// A `dsh` binary found on PATH (global npm, npx cache, …) or resolved via
+/// the user's shell (`which dsh` / `command -v dsh`). Resolves symlinks so
+/// we reach the real package directory. Detection is command-driven — the
+/// shell's own resolution is consulted, not just the app's minimal PATH.
 fn detect_path_dsh() -> Option<DshInfo> {
-    let path_var = std::env::var("PATH").ok()?;
     let name = if cfg!(windows) { "dsh.cmd" } else { "dsh" };
-    for dir in std::env::split_paths(&path_var) {
-        let candidate = dir.join(name);
-        if !candidate.is_file() {
-            continue;
-        }
-        // The shim is usually …/node_modules/.bin/dsh → real bin.js, so
-        // resolve symlinks first, then walk up to …/@deepseek-ai/dsh.
-        let mut p = std::fs::canonicalize(&candidate).unwrap_or(candidate);
-        loop {
-            let is_pkg = p.file_name().map(|f| f == "dsh").unwrap_or(false)
-                && p.parent()
-                    .and_then(|pp| pp.file_name())
-                    .map(|f| f == "@deepseek-ai")
-                    .unwrap_or(false);
-            if is_pkg {
-                let version = read_pkg_version(&p).unwrap_or_else(|| "unknown".to_string());
-                // Directory that contains node_modules/@deepseek-ai/dsh:
-                // p = …/node_modules/@deepseek-ai/dsh → root = p's great-grandparent.
-                let root = p.parent()?.parent()?.parent()?.to_path_buf();
-                return Some(DshInfo { path: root, version });
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(path_var) = std::env::var("PATH") {
+        candidates.extend(std::env::split_paths(&path_var).map(|d| d.join(name)));
+    }
+    #[cfg(not(windows))]
+    {
+        candidates.extend(shell_resolve_all(name));
+        candidates.extend(shell_path_entries().into_iter().map(|d| d.join(name)));
+    }
+    for candidate in candidates {
+        if candidate.is_file() {
+            if let Some(info) = dsh_from_bin(&candidate) {
+                return Some(info);
             }
-            p = match p.parent() {
-                Some(parent) => parent.to_path_buf(),
-                None => break,
-            };
         }
+    }
+    None
+}
+
+/// The shim is usually …/node_modules/.bin/dsh → real bin.js, so resolve
+/// symlinks first, then walk up to …/@deepseek-ai/dsh.
+fn dsh_from_bin(candidate: &Path) -> Option<DshInfo> {
+    let mut p = std::fs::canonicalize(candidate).unwrap_or_else(|_| candidate.to_path_buf());
+    loop {
+        let is_pkg = p.file_name().map(|f| f == "dsh").unwrap_or(false)
+            && p.parent()
+                .and_then(|pp| pp.file_name())
+                .map(|f| f == "@deepseek-ai")
+                .unwrap_or(false);
+        if is_pkg {
+            let version = read_pkg_version(&p).unwrap_or_else(|| "unknown".to_string());
+            // Directory that contains node_modules/@deepseek-ai/dsh:
+            // p = …/node_modules/@deepseek-ai/dsh → root = p's great-grandparent.
+            let root = p.parent()?.parent()?.parent()?.to_path_buf();
+            return Some(DshInfo { path: root, version });
+        }
+        p = match p.parent() {
+            Some(parent) => parent.to_path_buf(),
+            None => break,
+        };
     }
     None
 }
@@ -519,6 +696,7 @@ fn detect_global_dsh() -> Option<DshInfo> {
 ///    `node_modules/npm/` right next to `node.exe`.
 ///  * Unix archives / Homebrew / distro packages: `node` lives in
 ///    `<prefix>/bin`, npm in `<prefix>/lib/node_modules/npm/`.
+///
 /// (The npm *global prefix* — e.g. `%APPDATA%\npm` — is where `npm i -g`
 /// stores user packages; it is not where the runtime's own npm lives.)
 pub fn npm_cli_for(node: &Path) -> Option<PathBuf> {
@@ -711,6 +889,59 @@ mod tests {
             paths.iter().any(|p| p.starts_with(home.join(".nvm"))),
             "nvm paths should be scanned"
         );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn shell_resolve_returns_existing_node_binaries() {
+        // `which node` / `command -v node` driven resolution must return only
+        // real, absolute `node` binaries — and each must actually run
+        // (`node --version`), the command-driven check the installer relies on.
+        let resolved = shell_resolve_all("node");
+        println!("shell_resolve_all(node) = {resolved:?}");
+        for p in &resolved {
+            assert!(p.is_absolute(), "resolved path must be absolute: {p:?}");
+            assert!(
+                p.file_name().map(|f| f == "node").unwrap_or(false),
+                "resolved path must end in /node: {p:?}"
+            );
+            assert!(p.is_file(), "resolved path must exist: {p:?}");
+            assert!(
+                node_version(p).is_some(),
+                "`node --version` must run for {p:?}"
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_node_finds_shell_node_with_minimal_process_path() {
+        // Regression for "node installed at /opt/… but the launcher says it
+        // doesn't exist": a GUI app launched from Finder/Dock gets a minimal
+        // PATH, so detection must not depend on the process PATH alone — it
+        // asks the login shell, which sources the user's profile and sees the
+        // custom install.
+        let old = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", "/usr/bin:/bin");
+        let node = detect_node();
+        std::env::set_var("PATH", &old);
+        println!("detect_node with minimal PATH = {node:?}");
+
+        if let Some(n) = &node {
+            assert!(
+                node_major(&n.version).unwrap() >= MIN_NODE_MAJOR,
+                "detected node must be compatible (got v{})",
+                n.version
+            );
+        }
+        // If the login shell can see a node, the launcher must too — otherwise
+        // a custom /opt install would be wrongly reported as missing.
+        let shell = shell_resolve_all("node");
+        if !shell.is_empty() && node.is_none() {
+            panic!(
+                "node exists on the login shell PATH ({shell:?}) but detection returned None"
+            );
+        }
     }
 
     #[test]
