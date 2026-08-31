@@ -8,6 +8,7 @@ import type {
 } from "./types";
 import { api } from "./api";
 import Logo from "./components/Logo";
+import { PuzzleIcon, SettingsIcon } from "./components/Icons";
 import Home from "./pages/Home";
 import Settings from "./pages/Settings";
 import Plugins from "./pages/Plugins";
@@ -244,7 +245,7 @@ function AppShell({
           title={inPlugins ? t("app.close_plugins") : t("app.plugins")}
           onClick={() => setView(inPlugins ? "home" : "plugins")}
         >
-          {inPlugins ? "←" : "🧩"}
+          {inPlugins ? "←" : <PuzzleIcon />}
         </button>
         <button
           className={`icon-btn${inSettings ? " active" : ""}`}
@@ -252,7 +253,7 @@ function AppShell({
           title={inSettings ? t("app.close_settings") : t("app.settings")}
           onClick={() => setView(inSettings ? "home" : "settings")}
         >
-          {inSettings ? "←" : "⚙︎"}
+          {inSettings ? "←" : <SettingsIcon />}
         </button>
       </div>
 
