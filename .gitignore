@@ -35,3 +35,6 @@ lerna-debug.log*
 *.njsproj
 *.sln
 *.sw?
+
+# 误生成的虚拟环境激活片段，非项目内容
+OpenCV
