@@ -123,6 +123,11 @@ pub struct Config {
     /// will be installed. When set, detection and updates target this
     /// directory instead of the default `~/.dsh-launcher/dsh`.
     pub dsh_dir: Option<String>,
+    /// Optional explicit path to a Node.js binary to use. When set and
+    /// valid (runs, major >= 20), it is preferred over auto-detection.
+    /// This is the escape hatch for machines whose layout the automatic
+    /// shell-based discovery cannot resolve.
+    pub node_path: Option<String>,
 }
 
 impl Default for Config {
@@ -135,6 +140,7 @@ impl Default for Config {
             language: "en".to_string(),
             theme: "system".to_string(),
             dsh_dir: None,
+            node_path: None,
         }
     }
 }

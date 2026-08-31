@@ -352,6 +352,7 @@ pub struct ConfigPatch {
     pub language: Option<String>,
     pub theme: Option<String>,
     pub dsh_dir: Option<String>,
+    pub node_path: Option<String>,
 }
 
 #[tauri::command]
@@ -416,6 +417,46 @@ pub fn update_config(
             cfg.dsh_dir = Some(canonical.to_string_lossy().to_string());
         }
     }
+    if let Some(p) = patch.node_path {
+        let p = p.trim().to_string();
+        if p.is_empty() {
+            cfg.node_path = None; // clear → back to auto-detection
+        } else {
+            // Accept `~/…` expanded against home, then prove the binary
+            // works (executes + major >= MIN_NODE_MAJOR) before trusting it.
+            let expanded = if p.starts_with("~/") {
+                dirs::home_dir()
+                    .map(|h| h.join(p.trim_start_matches("~/")))
+                    .unwrap_or_else(|| std::path::PathBuf::from(&p))
+            } else {
+                std::path::PathBuf::from(&p)
+            };
+            if !expanded.is_file() {
+                return Err(format!(
+                    "Node.js binary not found at {} — check the path.",
+                    expanded.display()
+                ));
+            }
+            match crate::runtime::detector::detect_node_override(&expanded) {
+                Some(n) => {
+                    log(&format!(
+                        "node_path override set to {} (v{})",
+                        expanded.display(),
+                        n.version
+                    ));
+                    cfg.node_path = Some(expanded.to_string_lossy().to_string());
+                }
+                None => {
+                    return Err(format!(
+                        "{} does not provide a usable Node.js (needs v{}+). \
+                         Auto-detection will be used.",
+                        expanded.display(),
+                        crate::runtime::detector::MIN_NODE_MAJOR
+                    ));
+                }
+            }
+        }
+    }
     cfg.save()?;
     // Apply to the live manager (affects the next start).
     state.proc.set_target(&cfg.server.host, cfg.server.port);
@@ -454,6 +495,24 @@ pub fn set_autostart(
 // ---------------------------------------------------------------------------
 // Logs & misc
 // ---------------------------------------------------------------------------
+
+/// Full report of what the launcher detects on **this** machine (PATH,
+/// login-shell resolution, every Node.js candidate, the selected Node, and
+/// the npm/npx CLI it resolves). Each line is also written to launcher.log.
+/// Intended for diagnosing environment issues on machines we can't inspect
+/// directly — e.g. "paste this into the bug report."
+#[tauri::command]
+pub fn diagnose_environment() -> Vec<String> {
+    let report = crate::runtime::detector::env_diagnostics();
+    log(&format!(
+        "[diagnose] {} lines",
+        report.len()
+    ));
+    for line in &report {
+        log(&format!("[diagnose] {line}"));
+    }
+    report
+}
 
 #[tauri::command]
 pub fn read_log(name: String, lines: Option<u32>) -> Result<String, String> {

@@ -13,7 +13,46 @@ export default function Settings({ status, notify, onChanged }: Props) {
   const cfg = status.config;
   const { t, lang, setLang } = useI18n();
   const [busy, setBusy] = useState<string | null>(null);
+  const [nodePath, setNodePath] = useState(cfg.node_path ?? "");
   const theme = cfg.theme ?? "system";
+
+  async function saveNode() {
+    setBusy("node");
+    try {
+      await api.updateConfig({ node_path: nodePath.trim() });
+      onChanged();
+    } catch (e) {
+      notify(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function clearNode() {
+    setBusy("node");
+    setNodePath("");
+    try {
+      await api.updateConfig({ node_path: "" });
+      onChanged();
+    } catch (e) {
+      notify(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function copyDiagnostics() {
+    setBusy("diagnose");
+    try {
+      const lines = await api.diagnoseEnvironment();
+      await navigator.clipboard.writeText(lines.join("\n"));
+      notify(t("settings.diagnose_copied"));
+    } catch (e) {
+      notify(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
 
   async function changeLang(next: "en" | "zh") {
     setBusy("language");
@@ -90,16 +129,62 @@ export default function Settings({ status, notify, onChanged }: Props) {
         ))}
       </div>
 
-      {/* About */}
+      {/* Node.js runtime override */}
+      <div className="card section">
+        <h3>{t("settings.node")}</h3>
+        <p className="desc">{t("settings.node_desc")}</p>
+        <div className="setting-row" style={{ paddingTop: 0 }}>
+          <input
+            type="text"
+            className="node-path-input"
+            placeholder={t("settings.node_placeholder")}
+            value={nodePath}
+            disabled={busy === "node"}
+            onChange={(e) => setNodePath(e.target.value)}
+            spellCheck={false}
+          />
+        </div>
+        <div className="setting-row" style={{ justifyContent: "flex-end", gap: "8px" }}>
+          <button
+            className="btn secondary"
+            onClick={saveNode}
+            disabled={busy === "node"}
+          >
+            {t("settings.node_save")}
+          </button>
+          {cfg.node_path ? (
+            <button
+              className="btn secondary"
+              onClick={clearNode}
+              disabled={busy === "node"}
+            >
+              {t("settings.node_clear")}
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      {/* About + Diagnostics */}
       <div className="card section">
         <h3>{t("settings.about")}</h3>
         <div className="setting-row" style={{ paddingTop: 0 }}>
           <span className="label">DSH Launcher</span>
           <span className="v">v{status.launcher_version}</span>
         </div>
-        <p className="desc" style={{ marginBottom: 0 }}>
-          {t("settings.about_desc")}
-        </p>
+        <p className="desc">{t("settings.about_desc")}</p>
+        <div className="setting-row">
+          <div>
+            <div className="label">{t("settings.diagnose")}</div>
+            <div className="hint">{t("settings.diagnose_desc")}</div>
+          </div>
+          <button
+            className="btn secondary"
+            onClick={copyDiagnostics}
+            disabled={busy === "diagnose"}
+          >
+            {t("settings.diagnose_copy")}
+          </button>
+        </div>
       </div>
     </div>
   );

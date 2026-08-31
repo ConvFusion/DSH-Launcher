@@ -67,6 +67,7 @@ export interface Config {
   language: string;
   theme: string;
   dsh_dir: string | null;
+  node_path: string | null;
 }
 
 export interface LauncherStatus {

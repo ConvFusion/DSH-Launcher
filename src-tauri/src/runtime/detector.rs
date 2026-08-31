@@ -25,13 +25,10 @@ use super::{DshInfo, NodeInfo, NodeSource};
 use crate::config::{dsh_dir, log, runtime_dir};
 use std::collections::HashSet;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-#[cfg(not(windows))]
 use std::time::{Duration, Instant};
-
-#[cfg(not(windows))]
-use std::io::Read;
 
 /// Minimum Node major version supported by DeepSeek Harness.
 pub const MIN_NODE_MAJOR: u32 = 20;
@@ -157,6 +154,35 @@ pub fn detect_node_any() -> Option<NodeInfo> {
     best_by_version(all_node_candidates())
 }
 
+/// Validate an explicitly configured Node path (`Config.node_path`).
+///
+/// This is the per-machine escape hatch: on a computer whose Node layout
+/// the automatic discovery cannot resolve, the user points the launcher at
+/// the exact binary. It is trusted only after proving it works — the binary
+/// must execute and report a supported version — so a stale or wrong path
+/// never breaks the launcher: an invalid override falls back to
+/// auto-detection.
+pub fn detect_node_override(path: &Path) -> Option<NodeInfo> {
+    let version = node_version(path)?;
+    let supported = node_major(&version)
+        .map(|m| m >= MIN_NODE_MAJOR)
+        .unwrap_or(false);
+    if !supported {
+        log(&format!(
+            "configured node_path {} reports v{} (need >= v{}) — ignoring, falling back to auto-detection",
+            path.display(),
+            version,
+            MIN_NODE_MAJOR
+        ));
+        return None;
+    }
+    Some(NodeInfo {
+        path: path.to_path_buf(),
+        version,
+        source: NodeSource::System,
+    })
+}
+
 fn node_version(path: &Path) -> Option<String> {
     let out = Command::new(path).arg("--version").output().ok()?;
     if !out.status.success() {
@@ -196,39 +222,92 @@ fn check_candidate(path: &Path, source: NodeSource) -> Option<NodeInfo> {
 // shims, Homebrew — is a valid candidate. The hardcoded `known_node_paths`
 // list below is only a last-resort fallback.
 
-/// Run `shell -lc "<script>"` and return its stdout (banner lines included;
-/// parse with a marker). A short timeout keeps a slow or non-interactive
-/// shell profile from stalling detection.
-#[cfg(not(windows))]
-fn shell_stdout(shell: &str, script: &str) -> Option<String> {
+/// Run a command and capture its stdout, **guaranteed not to hang**:
+///
+/// * the child runs in its own process group (Unix) and the whole group is
+///   killed on timeout, so a lingering grandchild cannot hold the pipe;
+/// * stdout is drained by a reader thread, so a full pipe never blocks the
+///   child (and therefore never defeats the timeout);
+/// * the captured data is collected through a channel with a bounded wait.
+///
+/// Returns `(success, stdout_bytes)`.
+fn run_captured(mut cmd: Command, timeout: Duration) -> (bool, Vec<u8>) {
     use std::process::Stdio;
-    let mut child = Command::new(shell)
-        .args(["-lc", script])
-        .stdin(Stdio::null())
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let deadline = Instant::now() + Duration::from_secs(4);
-    loop {
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        // Own session/process group → we can reap the entire process tree.
+        use std::os::unix::process::CommandExt;
+        // SAFETY: the closure runs in the child right after fork; setsid
+        // merely detaches it into a new session (a just-forked child is
+        // never a group leader, so it cannot fail).
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    let Ok(mut child) = cmd.spawn() else {
+        return (false, Vec::new());
+    };
+    let (tx, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+    let mut reader: Option<std::thread::JoinHandle<()>> = None;
+    if let Some(mut out) = child.stdout.take() {
+        reader = Some(std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            let _ = out.read_to_end(&mut buf);
+            let _ = tx.send(buf);
+        }));
+    }
+    let deadline = Instant::now() + timeout;
+    let success = loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(_)) => return None,
+            Ok(Some(status)) => break status.success(),
             Ok(None) => {
                 if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
+                    break false;
                 }
                 std::thread::sleep(Duration::from_millis(20));
             }
-            Err(_) => return None,
+            Err(_) => break false,
         }
-    }
-    let mut buf = Vec::new();
-    let _ = child.stdout.take()?.read_to_end(&mut buf);
+    };
+    // Reap the whole tree so no grandchild can keep the pipe (and the reader
+    // thread) alive, then collect whatever stdout was produced.
+    kill_process_tree(&mut child);
     let _ = child.wait();
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    let data = rx.recv_timeout(Duration::from_secs(2)).unwrap_or_default();
+    let _ = reader; // completes once the pipe reaches EOF
+    (success, data)
+}
+
+/// Terminate the child and (on Unix) its entire process group.
+fn kill_process_tree(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    unsafe {
+        // Own session ⇒ the pid doubles as the process-group id.
+        libc::kill(-(child.id() as i32), libc::SIGKILL);
+    }
+    #[cfg(not(unix))]
+    let _ = child.kill();
+}
+
+/// Run `shell -lc "<script>"` and return its stdout (banner lines included;
+/// parse with a marker). Bounded by a short timeout so a slow or
+/// non-interactive shell profile can never stall detection.
+#[cfg(not(windows))]
+fn shell_stdout(shell: &str, script: &str) -> Option<String> {
+    let mut cmd = Command::new(shell);
+    cmd.args(["-lc", script]);
+    let (ok, data) = run_captured(cmd, Duration::from_secs(4));
+    if ok {
+        Some(String::from_utf8_lossy(&data).into_owned())
+    } else {
+        None
+    }
 }
 
 /// Resolve every `name` executable (e.g. `node`, `dsh`) the way the user's
@@ -687,50 +766,253 @@ fn detect_global_dsh() -> Option<DshInfo> {
 }
 
 /// Locate the `npm-cli.js` belonging to a Node installation, so we can run npm
+/// Locate the `npm-cli.js` belonging to a Node installation, so we can run npm
 /// without depending on the `npm`/`npm.cmd` shims on PATH (those shims
 /// resolve against whichever node happens to be first on PATH, which may not
 /// be the runtime we selected).
 ///
-/// npm's location relative to the node executable varies by distribution:
-///  * Windows archives / standard installs / fnm / nvm-windows: npm sits in
-///    `node_modules/npm/` right next to `node.exe`.
-///  * Unix archives / Homebrew / distro packages: `node` lives in
-///    `<prefix>/bin`, npm in `<prefix>/lib/node_modules/npm/`.
+/// Each user's machine differs — custom /opt/… prefixes, moved archives,
+/// Homebrew, nvm, fnm, volta, mixed installs — so nothing here is a
+/// hardcoded path list. Candidates are gathered from every signal we have:
+///
+///  1. **relative to the node binary** — Windows archives / standard installs
+///     / fnm / nvm-windows put `node_modules/npm/` right next to `node.exe`;
+///     Unix archives / Homebrew / distro packages put `node` in
+///     `<prefix>/bin` and npm in `<prefix>/lib/node_modules/npm/`;
+///  2. **the `npm` executable next to the node binary** — in the standard
+///     Unix layouts it is a symlink (chain) whose final target is
+///     `npm-cli.js`, or a small JS entry wrapper; resolving it locates the
+///     CLI no matter where the runtime lives;
+///  3. **the user's login shell** — `which npm` / `command -v npm` see
+///     whatever prefix the user's profile puts on PATH.
+///
+/// Every candidate is then **verified by executing it with the selected
+/// runtime** (`node <npm-cli.js> --version`); the first one that answers is
+/// the one we use. No guess is ever trusted blindly.
 ///
 /// (The npm *global prefix* — e.g. `%APPDATA%\npm` — is where `npm i -g`
 /// stores user packages; it is not where the runtime's own npm lives.)
 pub fn npm_cli_for(node: &Path) -> Option<PathBuf> {
-    let real = std::fs::canonicalize(node).unwrap_or_else(|_| node.to_path_buf());
-    let dir = real.parent()?;
-    let candidates = [
-        dir.join("node_modules").join("npm").join("bin").join("npm-cli.js"),
-        dir.join("..")
-            .join("lib")
-            .join("node_modules")
-            .join("npm")
-            .join("bin")
-            .join("npm-cli.js"),
-    ];
-    candidates.iter().find(|c| c.exists()).map(|c| c.to_path_buf())
+    cli_for(node, "npm", "npm-cli.js")
 }
 
-/// Same layout as [`npm_cli_for`] but for npx: `npx-cli.js` lives right next
-/// to `npm-cli.js`. Running the plugin command as `node npx-cli.js …` keeps
-/// it shell-free on every platform (Windows' `npx.cmd` would require
+/// Same strategy as [`npm_cli_for`] but for npx: `npx-cli.js` lives right
+/// next to `npm-cli.js`. Running the plugin command as `node npx-cli.js …`
+/// keeps it shell-free on every platform (Windows' `npx.cmd` would require
 /// `cmd /c`, which re-introduces shell parsing).
 pub fn npx_cli_for(node: &Path) -> Option<PathBuf> {
+    cli_for(node, "npx", "npx-cli.js")
+}
+
+fn cli_for(node: &Path, shim_name: &str, cli_name: &str) -> Option<PathBuf> {
     let real = std::fs::canonicalize(node).unwrap_or_else(|_| node.to_path_buf());
     let dir = real.parent()?;
-    let candidates = [
-        dir.join("node_modules").join("npm").join("bin").join("npx-cli.js"),
+
+    // 1. Known relative layouts (see `npm_cli_for` docs). Both npm-cli.js and
+    //    npx-cli.js live under node_modules/npm/bin in every distribution.
+    let relative = [
+        dir.join("node_modules").join("npm").join("bin").join(cli_name),
         dir.join("..")
             .join("lib")
             .join("node_modules")
             .join("npm")
             .join("bin")
-            .join("npx-cli.js"),
+            .join(cli_name),
     ];
-    candidates.iter().find(|c| c.exists()).map(|c| c.to_path_buf())
+    for c in &relative {
+        if cli_verifies(node, c) {
+            return Some(c.clone());
+        }
+    }
+
+    // 2. Resolve the tool executable that ships next to the node binary: a
+    //    symlink (chain) ends at the CLI script itself, or at a JS entry
+    //    wrapper the selected node can execute directly.
+    #[cfg(not(windows))]
+    {
+        let shim = dir.join(shim_name);
+        if shim.is_file() {
+            if let Ok(resolved) = std::fs::canonicalize(&shim) {
+                let is_cli = resolved
+                    .file_name()
+                    .map(|f| f == cli_name)
+                    .unwrap_or(false);
+                if (is_cli || is_js_entry(&resolved)) && cli_verifies(node, &resolved) {
+                    return Some(resolved);
+                }
+            }
+        }
+
+        // 3. The user's login shell — `which <tool>` / `command -v <tool>`
+        //    see whatever prefix the user's profile put on PATH. Reached only
+        //    when the runtime's own CLI could not be verified: a CLI that is
+        //    not the runtime's own still works as long as it runs under the
+        //    selected node (verified below).
+        for p in shell_resolve_all(shim_name) {
+            let is_cli = p
+                .file_name()
+                .map(|f| f == cli_name)
+                .unwrap_or(false);
+            if !(is_cli || is_js_entry(&p)) {
+                continue;
+            }
+            let rp = std::fs::canonicalize(&p).unwrap_or(p);
+            if cli_verifies(node, &rp) {
+                return Some(rp);
+            }
+        }
+    }
+
+    log(&format!(
+        "no usable {cli_name} found for the Node.js runtime at {}",
+        real.display()
+    ));
+    None
+}
+
+/// Run `node <cli> --version`; the CLI is usable with this runtime iff it
+/// answers with a version string. Bounded by a hard timeout.
+fn cli_verifies(node: &Path, cli: &Path) -> bool {
+    if !cli.is_file() {
+        return false;
+    }
+    let mut cmd = Command::new(node);
+    cmd.arg(cli).arg("--version");
+    let (ok, data) = run_captured(cmd, Duration::from_secs(15));
+    if !ok {
+        return false;
+    }
+    // `npm --version` prints e.g. "11.19.0" — require a numeric major
+    // component so arbitrary tool output is not accepted.
+    let s = String::from_utf8_lossy(&data);
+    s.trim()
+        .split('.')
+        .next()
+        .is_some_and(|s| !s.is_empty() && s.parse::<u32>().is_ok())
+}
+
+/// True when the file looks like a JavaScript entry point the selected `node`
+/// can execute directly (a `#!…node` shebang on the first line).
+#[cfg(not(windows))]
+fn is_js_entry(p: &Path) -> bool {
+    let Ok(mut f) = std::fs::File::open(p) else {
+        return false;
+    };
+    let mut buf = [0u8; 256];
+    let Ok(n) = f.read(&mut buf) else {
+        return false;
+    };
+    let head = String::from_utf8_lossy(&buf[..n]);
+    matches!(
+        head.lines().next(),
+        Some(line) if line.starts_with("#!") && line.contains("node")
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostics
+// ---------------------------------------------------------------------------
+
+/// A line-by-line report of what the detector can see **on this machine**:
+/// the PATH it was given, what the login shell resolves for node/npm/dsh,
+/// every Node.js candidate (with its version), the selected Node, and which
+/// npm/npx CLI resolves for it (plus the actual `npm --version` output).
+///
+/// Every discovery strategy runs for real, so the report reflects what the
+/// launcher actually does — not an assumption. Triggered on demand from the
+/// UI so a failing machine (one we can't inspect directly) can be analyzed
+/// by looking at what it reports.
+pub fn env_diagnostics() -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    out.push(format!("platform: {} {}", std::env::consts::OS, std::env::consts::ARCH));
+    out.push(format!(
+        "process PATH = {}",
+        std::env::var("PATH").unwrap_or_else(|_| "<unset>".into())
+    ));
+
+    #[cfg(not(windows))]
+    {
+        out.push(format!("login-shell PATH = {:?}", shell_path_entries()));
+        out.push(format!("login-shell `node` = {:?}", shell_resolve_all("node")));
+        out.push(format!("login-shell `npm` = {:?}", shell_resolve_all("npm")));
+        out.push(format!("login-shell `dsh` = {:?}", shell_resolve_all("dsh")));
+    }
+
+    let configured = crate::config::Config::load().node_path.clone();
+    match &configured {
+        Some(p) => {
+            let valid = detect_node_override(std::path::Path::new(p)).is_some();
+            out.push(format!("configured node_path = {} (valid={valid})", p,));
+        }
+        None => out.push("configured node_path = (none)".into()),
+    }
+
+    let cands = all_node_candidates();
+    out.push(format!("node candidates ({}):", cands.len()));
+    if cands.is_empty() {
+        out.push("  (none found)".into());
+    }
+    for c in &cands {
+        out.push(format!(
+            "  - v{} [{}] {}",
+            c.version,
+            match c.source {
+                NodeSource::System => "system",
+                NodeSource::Bundled => "bundled",
+            },
+            c.path.display()
+        ));
+    }
+
+    match detect_node() {
+        Some(node) => {
+            out.push(format!(
+                "selected node: v{} at {}",
+                node.version,
+                node.path.display()
+            ));
+
+            match npm_cli_for(&node.path) {
+                Some(cli) => {
+                    out.push(format!("npm-cli.js = {}", cli.display()));
+                    let mut cmd = Command::new(&node.path);
+                    cmd.arg(&cli).arg("--version");
+                    let (ok, data) = run_captured(cmd, Duration::from_secs(15));
+                    out.push(format!(
+                        "npm --version = '{}' ({})",
+                        String::from_utf8_lossy(&data).trim(),
+                        if ok { "ok" } else { "FAILED" }
+                    ));
+                }
+                None => out.push("npm-cli.js = NOT FOUND".into()),
+            }
+            match npx_cli_for(&node.path) {
+                Some(cli) => out.push(format!("npx-cli.js = {}", cli.display())),
+                None => out.push("npx-cli.js = NOT FOUND".into()),
+            }
+        }
+        None => {
+            out.push("selected node: NONE (no compatible Node.js >= v{MIN_NODE_MAJOR})".into());
+            if let Some(any) = detect_node_any() {
+                out.push(format!(
+                    "newest node (any version): v{} at {}",
+                    any.version,
+                    any.path.display()
+                ));
+            }
+        }
+    }
+
+    match detect_dsh() {
+        Some(d) => out.push(format!(
+            "dsh: v{} at {}",
+            d.version,
+            d.path.display()
+        )),
+        None => out.push("dsh: NOT FOUND".into()),
+    }
+
+    out
 }
 
 #[cfg(test)]
@@ -807,12 +1089,37 @@ mod tests {
         assert!(info.path.join("node_modules").join(DSH_PACKAGE).join("package.json").exists());
     }
 
+    /// A fake `node` executable. On Unix it is a shell script that either
+    /// answers `--version` (so `cli_verifies` accepts a CLI) or exits
+    /// non-zero (so every CLI is rejected). On Windows a stub is written;
+    /// the tests only assert the negative (strict) case there.
+    fn fake_node(path: &Path, working: bool) {
+        #[cfg(unix)]
+        {
+            let script = if working {
+                "#!/bin/sh\necho 11.0.0\n"
+            } else {
+                "#!/bin/sh\nexit 1\n"
+            };
+            std::fs::write(path, script).unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            let _ = working;
+            std::fs::write(path, "").unwrap();
+        }
+    }
+
     #[test]
     fn npm_cli_for_locates_runtime_bundled_npm() {
         // Layout A: node executable next to node_modules/npm — Windows
         // archives / standard installs / fnm / nvm-windows.
         // Layout B: <prefix>/bin/node + <prefix>/lib/node_modules/npm —
         // Unix archives, Homebrew, distro packages.
+        // Every candidate is verified by running it with the selected node,
+        // so the fake node must be executable on Unix.
         let base = std::env::temp_dir().join(format!("dsh-npmcli-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
 
@@ -820,32 +1127,148 @@ mod tests {
         std::fs::create_dir_all(a.join("node_modules/npm/bin")).unwrap();
         std::fs::write(a.join("node_modules/npm/bin/npm-cli.js"), "").unwrap();
         let a_node = a.join("node.exe");
-        std::fs::write(&a_node, "").unwrap();
+        fake_node(&a_node, true);
         let got = npm_cli_for(&a_node);
+        #[cfg(unix)]
         assert!(
             got.as_ref().map(|p| p.exists() && p.ends_with("npm-cli.js")).unwrap_or(false),
             "layout A: {got:?}"
         );
+        #[cfg(windows)]
+        assert!(got.is_none(), "unverified CLI must not be trusted: {got:?}");
 
         let b = base.join("b");
         std::fs::create_dir_all(b.join("bin")).unwrap();
         std::fs::create_dir_all(b.join("lib/node_modules/npm/bin")).unwrap();
         std::fs::write(b.join("lib/node_modules/npm/bin/npm-cli.js"), "").unwrap();
         let b_node = b.join("bin/node");
-        std::fs::write(&b_node, "").unwrap();
+        fake_node(&b_node, true);
         let got = npm_cli_for(&b_node);
+        #[cfg(unix)]
         assert!(
             got.as_ref().map(|p| p.exists() && p.ends_with("npm-cli.js")).unwrap_or(false),
             "layout B: {got:?}"
         );
+        #[cfg(windows)]
+        assert!(got.is_none(), "unverified CLI must not be trusted: {got:?}");
 
-        // No npm in either layout → None.
+        // No npm anywhere and the node refuses to run → None. Even an npm the
+        // user's shell could provide is rejected, because it cannot be
+        // verified against this runtime.
         let c = base.join("c");
         std::fs::create_dir_all(&c).unwrap();
         let c_node = c.join("node");
-        std::fs::write(&c_node, "").unwrap();
+        fake_node(&c_node, false);
         assert!(npm_cli_for(&c_node).is_none());
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_cli_for_resolves_npm_symlink_next_to_node() {
+        // The reported test-Mac scenario: node at a custom prefix whose
+        // relative lib/ layout does not match the standard guesses, but an
+        // `npm` symlink sits right next to the node binary and points at the
+        // real npm-cli.js. The symlink must be followed to locate the CLI.
+        let base = std::env::temp_dir().join(format!("dsh-npmlink-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let bin = base.join("bin");
+        let cli = base.join("custom").join("npm-cli.js");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        std::fs::write(&cli, "").unwrap();
+        let node = bin.join("node");
+        fake_node(&node, true);
+        std::os::unix::fs::symlink("../custom/npm-cli.js", bin.join("npm")).unwrap();
+
+        let got = npm_cli_for(&node);
+        let want = std::fs::canonicalize(&cli).ok();
+        let have = got.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(have, want, "npm symlink next to node must resolve to the CLI");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_cli_for_accepts_js_wrapper_next_to_node() {
+        // No standard layout at all; the `npm` next to node is a plain JS
+        // entry wrapper (node shebang). The selected runtime can execute it
+        // directly, so it is a valid CLI.
+        let base = std::env::temp_dir().join(format!("dsh-npmjs-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let node = bin.join("node");
+        fake_node(&node, true);
+        let wrapper = bin.join("npm");
+        std::fs::write(&wrapper, "#!/usr/bin/env node\nrequire('./lib/cli.js')(process)\n")
+            .unwrap();
+
+        let got = npm_cli_for(&node);
+        let want = std::fs::canonicalize(&wrapper).ok();
+        let have = got.as_ref().and_then(|p| std::fs::canonicalize(p).ok());
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(have, want, "a node-shebang JS wrapper must be accepted");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn npm_cli_for_never_returns_a_shell_script() {
+        // An `npm` next to node that is a *shell* script must never be
+        // returned as a CLI (the runtime could not execute it). If anything
+        // is returned it must come from elsewhere (e.g. the user's shell).
+        let base = std::env::temp_dir().join(format!("dsh-npmsh-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let node = bin.join("node");
+        fake_node(&node, true);
+        let script = bin.join("npm");
+        std::fs::write(&script, "#!/bin/sh\necho 11.0.0\n").unwrap();
+
+        let got = npm_cli_for(&node);
+        let script_real = std::fs::canonicalize(&script).ok();
+        let _ = std::fs::remove_dir_all(&base);
+        if let Some(p) = got {
+            let p = std::fs::canonicalize(&p).ok();
+            assert_ne!(
+                p, script_real,
+                "a shell script must not be used as the npm CLI"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn node_override_requires_a_working_supported_node() {
+        // A configured node path is trusted only if it executes and reports a
+        // supported version. Anything else is rejected so a stale override
+        // falls back to auto-detection instead of breaking the launcher.
+        let base = std::env::temp_dir().join(format!("dsh-nodeovr-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let write_exec = |path: &Path, body: &str| {
+            std::fs::write(path, body).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        };
+
+        let good = base.join("good-node");
+        write_exec(&good, "#!/bin/sh\necho 22.11.0\n");
+        let broken = base.join("broken-node");
+        write_exec(&broken, "#!/bin/sh\nexit 1\n");
+
+        let ok = detect_node_override(&good);
+        assert!(
+            ok.as_ref().map(|n| n.version == "22.11.0").unwrap_or(false),
+            "a working, supported configured node must be accepted: {ok:?}"
+        );
+        assert!(detect_node_override(&broken).is_none(), "a broken node must be rejected");
+        assert!(
+            detect_node_override(&base.join("missing")).is_none(),
+            "a missing node must be rejected"
+        );
         let _ = std::fs::remove_dir_all(&base);
     }
 

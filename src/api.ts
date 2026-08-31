@@ -20,6 +20,10 @@ export const api = {
     invoke("restart_dsh", { openBrowser }),
   openHarness: () => invoke<void>("open_harness"),
 
-  updateConfig: (patch: { language?: string; theme?: string }) =>
-    invoke<Config>("update_config", { patch }),
+  updateConfig: (patch: {
+    language?: string;
+    theme?: string;
+    node_path?: string | null;
+  }) => invoke<Config>("update_config", { patch }),
+  diagnoseEnvironment: () => invoke<string[]>("diagnose_environment"),
 };

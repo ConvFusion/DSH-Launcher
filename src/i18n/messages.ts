@@ -69,6 +69,18 @@ const en = {
   "settings.theme.system": "Follow system",
   "settings.theme.light": "Light",
   "settings.theme.dark": "Dark",
+  "settings.node": "Node.js runtime",
+  "settings.node_desc":
+    "Optional. Point the launcher at a specific Node.js binary (e.g. /opt/homebrew/bin/node). " +
+    "It is used only after it is verified to run; leave empty to rely on automatic detection.",
+  "settings.node_placeholder": "e.g. /opt/homebrew/bin/node",
+  "settings.node_save": "Save",
+  "settings.node_clear": "Clear",
+  "settings.diagnose": "Diagnostics",
+  "settings.diagnose_desc":
+    "Copy a report of exactly what Node.js/npm detection found on this machine — paste it into a bug report.",
+  "settings.diagnose_copy": "Copy report",
+  "settings.diagnose_copied": "Diagnostics copied to clipboard.",
   "settings.about": "About",
   "settings.about_desc":
     "DSH Launcher installs and starts DeepSeek Harness for you — no command line needed.",
@@ -142,6 +154,18 @@ const zh: Record<MessageKey, string> = {
   "settings.theme.system": "跟随系统",
   "settings.theme.light": "浅色",
   "settings.theme.dark": "深色",
+  "settings.node": "Node.js 运行时",
+  "settings.node_desc":
+    "可选。将启动器指向指定的 Node.js 可执行文件（如 /opt/homebrew/bin/node）。" +
+    "仅在验证其可正常运行后才会使用；留空则依赖自动检测。",
+  "settings.node_placeholder": "例如 /opt/homebrew/bin/node",
+  "settings.node_save": "保存",
+  "settings.node_clear": "清除",
+  "settings.diagnose": "诊断",
+  "settings.diagnose_desc":
+    "复制一份报告，记录本机 Node.js/npm 检测的实际结果——可粘贴到问题反馈中。",
+  "settings.diagnose_copy": "复制报告",
+  "settings.diagnose_copied": "诊断信息已复制到剪贴板。",
   "settings.about": "关于",
   "settings.about_desc":
     "DSH Launcher 帮你自动安装并启动 DeepSeek Harness——无需使用命令行。",

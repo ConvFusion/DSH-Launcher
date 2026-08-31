@@ -70,6 +70,7 @@ pub fn run(launched_by_autostart: bool) {
             commands::update_config,
             commands::set_autostart,
             commands::read_log,
+            commands::diagnose_environment,
             commands::open_log_dir,
             commands::quit_app,
             commands::suggest_ports,

@@ -326,6 +326,13 @@ body {
   background: var(--accent-hover);
 }
 
+/* Compact secondary button (Settings: save/clear/copy). */
+.btn.secondary {
+  padding: 7px 14px;
+  font-size: 12.5px;
+  border-radius: 9px;
+}
+
 /* The single big control button on the home page. */
 .btn.big {
   min-width: 340px;
@@ -525,6 +532,30 @@ body {
 }
 
 .plugin-name:disabled {
+  opacity: 0.7;
+}
+
+/* Settings → Node.js runtime: monospace path input. */
+.node-path-input {
+  width: 100%;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 14px;
+  outline: none;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.node-path-input:focus {
+  border-color: var(--accent-border);
+  background: var(--surface);
+}
+
+.node-path-input:disabled {
   opacity: 0.7;
 }
 

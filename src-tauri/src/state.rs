@@ -80,11 +80,20 @@ impl AppState {
     }
 
     pub fn node(&self) -> Option<NodeInfo> {
+        // Read the config first (short lock), then the cache — lock ordering
+        // is cfg → env_cache, never nested.
+        let configured = { self.cfg.lock().unwrap().node_path.clone() };
         let mut c = self.env_cache.lock().unwrap();
         if c.node.0.elapsed() < ENV_CACHE_TTL {
             return c.node.1.clone();
         }
-        let found = runtime::detector::detect_node();
+        let found = match &configured {
+            // An explicit, working override wins over auto-detection; an
+            // invalid one falls back to it (and logs why it was skipped).
+            Some(p) => runtime::detector::detect_node_override(std::path::Path::new(p))
+                .or_else(runtime::detector::detect_node),
+            None => runtime::detector::detect_node(),
+        };
         c.node = (Instant::now(), found.clone());
         found
     }
