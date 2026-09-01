@@ -506,9 +506,10 @@ body {
 }
 
 /* ---------- plugins page ---------- */
+/* Same content width as the settings page (`.settings`), for visual parity. */
 
 .plugins {
-  max-width: 640px;
+  max-width: 560px;
 }
 
 .plugin-input {
