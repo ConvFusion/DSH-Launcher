@@ -162,6 +162,11 @@ body {
   border-color: var(--accent-border);
 }
 
+.icon-btn:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
 /* ---------- home: logo + status + buttons ---------- */
 
 .home {

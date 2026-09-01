@@ -17,6 +17,17 @@ pub fn get_status(state: State<'_, AppState>) -> crate::state::LauncherStatus {
     status_payload(&state, &state.proc.snapshot())
 }
 
+/// Home "refresh" button: force a **full re-detection** of the environment
+/// (Node.js, DSH, browsers) by expiring the env cache, then return a fresh
+/// status payload. This makes a manual refresh behave like reopening the
+/// app, instead of returning values that are still within the 30s env-cache
+/// TTL (which `get_status` alone would do).
+#[tauri::command]
+pub fn refresh_status(state: State<'_, AppState>) -> crate::state::LauncherStatus {
+    state.invalidate_env_cache();
+    status_payload(&state, &state.proc.snapshot())
+}
+
 // ---------------------------------------------------------------------------
 // Environment
 // ---------------------------------------------------------------------------

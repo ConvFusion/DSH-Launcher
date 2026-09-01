@@ -9,6 +9,8 @@ import type {
 
 export const api = {
   getStatus: () => invoke<LauncherStatus>("get_status"),
+  /** Force a full env re-detection (Node/DSH/browsers) + return fresh status. */
+  refreshStatus: () => invoke<LauncherStatus>("refresh_status"),
   ensureEnvironment: () => invoke<EnvReport>("ensure_environment"),
   checkDshUpdate: () => invoke<UpdateInfo>("check_dsh_update"),
   installDsh: () => invoke<string>("install_dsh_package"),

@@ -8,7 +8,7 @@ import type {
 } from "./types";
 import { api } from "./api";
 import Logo from "./components/Logo";
-import { PuzzleIcon, SettingsIcon } from "./components/Icons";
+import { PuzzleIcon, SettingsIcon, RefreshIcon } from "./components/Icons";
 import Home from "./pages/Home";
 import Settings from "./pages/Settings";
 import Plugins from "./pages/Plugins";
@@ -25,6 +25,7 @@ export default function App() {
   const [view, setView] = useState<View>("home");
   const [toast, setToast] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const notify = useCallback((msg: string) => {
@@ -62,6 +63,29 @@ export default function App() {
     checkUpdate();
   }, [checkUpdate]);
 
+  // "Refresh home" (top-right icon): behaves like reopening the app —
+  // forces a full environment re-detection (Node.js / DSH / browsers) and
+  // re-fetches the latest DSH version. The status and update checks are
+  // independent: a failed network lookup still updates the local status.
+  const handleRefresh = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      try {
+        setStatus(await api.refreshStatus());
+      } catch {
+        /* backend not ready yet */
+      }
+      try {
+        setUpdateInfo(await api.checkDshUpdate());
+      } catch {
+        /* network unreachable — keep the previous value */
+      }
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refreshing]);
+
   const lang = initialLanguage(status?.config.language ?? null);
 
   useEffect(() => {
@@ -95,6 +119,8 @@ export default function App() {
         updateInfo={updateInfo}
         checkUpdate={checkUpdate}
         refresh={refresh}
+        onRefresh={handleRefresh}
+        refreshing={refreshing}
         notify={notify}
       />
     </I18nProvider>
@@ -112,6 +138,8 @@ function AppShell({
   updateInfo,
   checkUpdate,
   refresh,
+  onRefresh,
+  refreshing,
   notify,
 }: {
   status: LauncherStatus | null;
@@ -124,6 +152,8 @@ function AppShell({
   updateInfo: UpdateInfo | null;
   checkUpdate: () => void;
   refresh: () => Promise<void>;
+  onRefresh: () => void;
+  refreshing: boolean;
   notify: (msg: string) => void;
 }) {
   const { t } = useI18n();
@@ -239,6 +269,15 @@ function AppShell({
   return (
     <div className="app">
       <div className="topbar">
+        <button
+          className="icon-btn"
+          aria-label={t("app.refresh")}
+          title={t("app.refresh")}
+          onClick={onRefresh}
+          disabled={refreshing}
+        >
+          {refreshing ? <span className="spinner" /> : <RefreshIcon />}
+        </button>
         <button
           className={`icon-btn plugin${inPlugins ? " active" : ""}`}
           aria-label={inPlugins ? t("app.close_plugins") : t("app.plugins")}

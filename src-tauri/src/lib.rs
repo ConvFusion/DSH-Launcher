@@ -54,6 +54,7 @@ pub fn run(launched_by_autostart: bool) {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_status,
+            commands::refresh_status,
             commands::ensure_environment,
             commands::install_node_runtime,
             commands::install_dsh_package,

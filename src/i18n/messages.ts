@@ -10,6 +10,7 @@ const en = {
   "app.close_settings": "Back",
   "app.plugins": "Plugins",
   "app.close_plugins": "Back",
+  "app.refresh": "Refresh",
 
   // Home — one big button
   "home.install": "Install DeepSeek Harness",
@@ -95,6 +96,7 @@ const zh: Record<MessageKey, string> = {
   "app.close_settings": "返回",
   "app.plugins": "插件",
   "app.close_plugins": "返回",
+  "app.refresh": "刷新",
 
   // Home — one big button
   "home.install": "安装 DeepSeek Harness",
