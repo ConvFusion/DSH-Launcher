@@ -17,6 +17,12 @@
 
 ---
 
+## 🖥️ 界面预览
+
+![DSH Launcher 界面预览：首页 / 插件 / 设置](public/screenshots.png)
+
+---
+
 ## 🚀 快速开始
 
 ### 下载
@@ -78,29 +84,6 @@ xattr -cr "/Applications/DSH Launcher.app"
 │   └── harness.log  # DSH 运行日志
 ├── runtime/         # Node.js 运行时（按需下载）
 └── dsh/             # DeepSeek Harness 安装目录
-```
-
----
-
-## 🛠️ 开发
-
-```bash
-# 安装依赖
-npm install
-
-# 开发模式（需要 Rust 环境）
-npm run tauri dev
-
-# 构建发布包
-npm run tauri build
-```
-
-### 项目结构
-
-```
-src/              # 前端 React + TypeScript
-src-tauri/        # 后端 Rust + Tauri 2
-scripts/          # 构建/签名/工具链脚本
 ```
 
 ---

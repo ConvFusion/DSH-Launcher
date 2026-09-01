@@ -38,3 +38,11 @@ lerna-debug.log*
 
 # 误生成的虚拟环境激活片段，非项目内容
 OpenCV
+
+# 图片入库白名单：仅 public/icon.png 与 public/screenshots.png 入仓库
+# （logo 复用 src-tauri/app-icon.png 母版；大尺寸原图与截图原图不入库）
+public/icon1024.png
+public/icon0.1.1.png
+public/home.png
+public/plugin.png
+public/setting.png
