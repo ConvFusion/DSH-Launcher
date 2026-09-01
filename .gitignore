@@ -14,6 +14,9 @@ src-tauri/gen
 # Local helper scripts (signing, packaging, toolchain) — not shipped
 scripts/
 
+# GitHub CI / release 自动化 — 一律本地构建，不入库
+.github/
+
 # Logs
 logs
 *.log
@@ -26,8 +29,7 @@ lerna-debug.log*
 *.local
 
 # Editor directories and files
-.vscode/*
-!.vscode/extensions.json
+.vscode/
 .idea
 .DS_Store
 *.suo
