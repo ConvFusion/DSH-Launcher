@@ -11,8 +11,10 @@ src-tauri/gen
 .toolchain
 .npm-cache
 
-# Local helper scripts (signing, packaging, toolchain) — not shipped
-scripts/
+# Local signing scripts — contain Apple developer credentials (Team ID,
+# App Store Connect API key ID / issuer). Never push.
+scripts/sign-macos.sh
+scripts/sign-macos-debug.sh
 
 # GitHub CI / release 自动化 — 一律本地构建，不入库
 .github/
