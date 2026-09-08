@@ -28,4 +28,6 @@ export const api = {
     node_path?: string | null;
   }) => invoke<Config>("update_config", { patch }),
   diagnoseEnvironment: () => invoke<string[]>("diagnose_environment"),
+  /** Bundle all logs + config + diagnostics into a zip; returns its path. */
+  collectLogs: () => invoke<string>("collect_logs"),
 };

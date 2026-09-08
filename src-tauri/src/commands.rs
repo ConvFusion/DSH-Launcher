@@ -525,6 +525,122 @@ pub fn diagnose_environment() -> Vec<String> {
     report
 }
 
+/// Bundle everything needed to diagnose a problem on **this** machine into a
+/// single zip file the user can send for support:
+///
+/// ```text
+/// logs/launcher.log        startup + lifecycle events
+/// logs/install.log(.old)   full Node/DSH/plugin install command output
+/// logs/harness.log(.old)   DSH runtime (web server) output
+/// config.json, state.json  user settings + last process record
+/// diagnostics.txt          live environment report (node/npm/dsh detection)
+/// meta.txt                 launcher version, OS, arch, data dir, timestamp
+/// ```
+///
+/// The zip is written into the app data directory (`~/.dsh-launcher`) and
+/// revealed (selected) in the OS file manager, so even non-technical users
+/// can find and attach it. Returns the path of the created file.
+#[tauri::command]
+pub fn collect_logs() -> Result<String, String> {
+    let dir = config::data_dir();
+    let stamp = config::now_stamp().replace(':', "-");
+    let dest = dir.join(format!("dsh-launcher-logs-{stamp}.zip"));
+
+    let mut zw = zip::ZipWriter::new(
+        std::fs::File::create(&dest).map_err(|e| format!("create {}: {e}", dest.display()))?,
+    );
+    let opts: zip::write::FileOptions<'_, ()> = zip::write::FileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let logs = config::logs_dir();
+    for name in [
+        "launcher.log",
+        "install.log",
+        "install.log.old",
+        "harness.log",
+        "harness.log.old",
+    ] {
+        zip_add_file(&mut zw, &opts, &format!("logs/{name}"), &logs.join(name))?;
+    }
+    zip_add_file(&mut zw, &opts, "config.json", &config::config_path())?;
+    zip_add_file(&mut zw, &opts, "state.json", &config::state_path())?;
+
+    // Live environment report — run for real, so it reflects the machine.
+    let diag: String =
+        crate::runtime::detector::env_diagnostics().join("\n") + "\n";
+    zip_write_text(&mut zw, &opts, "diagnostics.txt", &diag)?;
+
+    let meta = format!(
+        "dsh-launcher version: {}\ngenerated at: {}\nos: {}\narch: {}\ndata dir: {}\n",
+        env!("CARGO_PKG_VERSION"),
+        config::now_stamp(),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        dir.display(),
+    );
+    zip_write_text(&mut zw, &opts, "meta.txt", &meta)?;
+
+    zw.finish().map_err(|e| format!("finish zip: {e}"))?;
+    let path = dest.to_string_lossy().to_string();
+    log(&format!("log bundle written: {path}"));
+    reveal_path(&dest);
+    Ok(path)
+}
+
+fn zip_add_file(
+    zw: &mut zip::ZipWriter<std::fs::File>,
+    opts: &zip::write::FileOptions<'_, ()>,
+    name: &str,
+    path: &std::path::Path,
+) -> Result<(), String> {
+    if !path.is_file() {
+        return Ok(());
+    }
+    let data = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    zip_write_bytes(zw, opts, name, &data)
+}
+
+fn zip_write_bytes(
+    zw: &mut zip::ZipWriter<std::fs::File>,
+    opts: &zip::write::FileOptions<'_, ()>,
+    name: &str,
+    data: &[u8],
+) -> Result<(), String> {
+    use std::io::Write;
+    zw.start_file(name, opts.clone())
+        .map_err(|e| format!("zip {name}: {e}"))?;
+    zw.write_all(data).map_err(|e| format!("zip {name}: {e}"))
+}
+
+fn zip_write_text(
+    zw: &mut zip::ZipWriter<std::fs::File>,
+    opts: &zip::write::FileOptions<'_, ()>,
+    name: &str,
+    text: &str,
+) -> Result<(), String> {
+    zip_write_bytes(zw, opts, name, text.as_bytes())
+}
+
+/// Reveal a file in the OS file manager, selected when the OS allows it.
+fn reveal_path(path: &std::path::Path) {
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("explorer.exe")
+            .arg(format!("/select,{}", path.to_string_lossy()))
+            .spawn();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg("-R").arg(path).spawn();
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        if let Some(parent) = path.parent() {
+            let _ = std::process::Command::new("xdg-open").arg(parent).spawn();
+        }
+    }
+}
+
 #[tauri::command]
 pub fn read_log(name: String, lines: Option<u32>) -> Result<String, String> {
     config::read_log_tail(&name, lines.unwrap_or(200).min(2000) as usize)
@@ -748,6 +864,11 @@ pub async fn install_dsh_plugin(
         npx_cli.display(),
         npx_args.join(" ")
     ));
+    config::install_log_line(&format!(
+        "$ node {} {}",
+        npx_cli.display(),
+        npx_args.join(" ")
+    ));
 
     const MAX_ATTEMPTS: u32 = 2;
     let mut last_exit: Option<i32> = None;
@@ -776,6 +897,10 @@ pub async fn install_dsh_plugin(
         }
     }
 
+    config::install_log_line(&format!(
+        "plugin install FAILED after {MAX_ATTEMPTS} attempts (exit code {:?})",
+        last_exit
+    ));
     Err(format!(
         "The plugin install failed after {MAX_ATTEMPTS} attempts (exit code {:?}) — see the log above.",
         last_exit
@@ -816,20 +941,29 @@ async fn run_plugin_once(
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
-        Err(e) => return PluginRun::Fatal(format!("Could not start the plugin command: {e}")),
+        Err(e) => {
+            config::install_log_line(&format!(
+                "plugin command FAILED to start: {e}"
+            ));
+            return PluginRun::Fatal(format!("Could not start the plugin command: {e}"));
+        }
     };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    let input_log = input.to_string();
+    // Two owned copies: each spawned pipe task moves its own in.
+    let input_log_err = input.to_string();
 
-    // Stream both pipes to the UI.
+    // Stream both pipes to the UI **and** install.log (the complete plugin
+    // install output must survive for post-hoc diagnosis — stderr included).
     if let Some(out) = stdout {
         let app = app.clone();
-        let input_log = input.to_string();
         tokio::spawn(async move {
             use tokio::io::AsyncBufReadExt;
             let mut lines = tokio::io::BufReader::new(out).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 log(&format!("[plugin:{input_log}] {line}"));
+                config::install_log_line(&format!("[plugin:{input_log}] {line}"));
                 let _ = app.emit("dsh://plugin", line);
             }
         });
@@ -840,6 +974,7 @@ async fn run_plugin_once(
             use tokio::io::AsyncBufReadExt;
             let mut lines = tokio::io::BufReader::new(err).lines();
             while let Ok(Some(line)) = lines.next_line().await {
+                config::install_log_line(&format!("[plugin:{input_log_err}:stderr] {line}"));
                 let _ = app.emit("dsh://plugin", line);
             }
         });

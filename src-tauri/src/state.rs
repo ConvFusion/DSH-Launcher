@@ -362,6 +362,17 @@ pub async fn startup(app: AppHandle) {
     //    with explicit "Install" buttons — nothing is downloaded here.
     let node = state.node();
     let dsh = state.dsh();
+    log(&format!(
+        "startup detection: node={} dsh={}",
+        node
+            .as_ref()
+            .map(|n| format!("v{} at {}", n.version, n.path.display()))
+            .unwrap_or_else(|| "none".to_string()),
+        dsh
+            .as_ref()
+            .map(|d| format!("v{} at {}", d.version, d.path.display()))
+            .unwrap_or_else(|| "none".to_string()),
+    ));
     if !state.env_status().ready {
         let what = match (node.is_none(), dsh.is_none()) {
             (true, true) => "Node.js and DeepSeek Harness are not installed yet.",

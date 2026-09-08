@@ -203,7 +203,7 @@ pub fn clear_process_state() {
 // Rolling harness log
 // ---------------------------------------------------------------------------
 
-const HARNESS_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+const LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
 
 fn harness_log_path() -> PathBuf {
     logs_dir().join("harness.log")
@@ -220,7 +220,7 @@ pub fn harness_log_line(line: &str) {
         Err(_) => return,
     };
 
-    if guard.is_none() || needs_rotation(&path) {
+    if guard.is_none() || needs_rotation(&path, LOG_MAX_BYTES) {
         // Rotate once (keep a single .old copy).
         if guard.is_some() {
             let _ = fs::remove_file(path.with_extension("log.old"));
@@ -247,10 +247,59 @@ pub fn harness_log_line(line: &str) {
     }
 }
 
-fn needs_rotation(path: &Path) -> bool {
+fn needs_rotation(path: &Path, max: u64) -> bool {
     match fs::metadata(path) {
-        Ok(m) => m.len() > HARNESS_LOG_MAX_BYTES,
+        Ok(m) => m.len() > max,
         Err(_) => false,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Install log — full output of every Node.js / DSH / plugin install command
+// ---------------------------------------------------------------------------
+//
+// launcher.log only carries short progress lines and an error *tail*; when an
+// install fails on a user's machine (npm network errors, registry config,
+// permission problems) the FULL command output is what makes it diagnosable.
+// So every install command and its complete stdout/stderr are appended here.
+// Same rotation policy as the harness log (5 MiB, one .old generation).
+
+fn install_log_path() -> PathBuf {
+    logs_dir().join("install.log")
+}
+
+static INSTALL_LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
+
+/// Append `text` (one or more lines) to install.log with a unix-timestamp
+/// prefix. Rotates once past the size cap (keeps a single .old copy).
+pub fn install_log_line(text: &str) {
+    ensure_dirs();
+    let path = install_log_path();
+    let mut guard = INSTALL_LOG.lock().unwrap();
+    if guard.is_none() || needs_rotation(&path, LOG_MAX_BYTES) {
+        // Rotate once (keep a single .old copy).
+        if guard.is_some() {
+            let _ = fs::remove_file(path.with_extension("log.old"));
+            let _ = fs::rename(&path, path.with_extension("log.old"));
+        }
+        match fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            Ok(f) => *guard = Some(f),
+            Err(e) => {
+                log(&format!("failed to open install.log: {e}"));
+                return;
+            }
+        }
+    }
+    if let Some(f) = guard.as_mut() {
+        let ts = std::time::SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "[{ts}] {text}");
     }
 }
 

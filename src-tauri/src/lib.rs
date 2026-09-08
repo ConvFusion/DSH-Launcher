@@ -16,6 +16,12 @@ pub fn run(launched_by_autostart: bool) {
         "dsh-launcher v{} starting (autostart={launched_by_autostart})",
         env!("CARGO_PKG_VERSION")
     ));
+    config::log(&format!(
+        "platform: {} {} | data dir: {}",
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        config::data_dir().display()
+    ));
 
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -72,6 +78,7 @@ pub fn run(launched_by_autostart: bool) {
             commands::set_autostart,
             commands::read_log,
             commands::diagnose_environment,
+            commands::collect_logs,
             commands::open_log_dir,
             commands::quit_app,
             commands::suggest_ports,

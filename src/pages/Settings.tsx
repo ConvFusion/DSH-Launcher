@@ -54,6 +54,18 @@ export default function Settings({ status, notify, onChanged }: Props) {
     }
   }
 
+  async function exportLogs() {
+    setBusy("logs");
+    try {
+      const path = await api.collectLogs();
+      notify(t("settings.logs_exported", { path }));
+    } catch (e) {
+      notify(String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   async function changeLang(next: "en" | "zh") {
     setBusy("language");
     setLang(next);
@@ -183,6 +195,19 @@ export default function Settings({ status, notify, onChanged }: Props) {
             disabled={busy === "diagnose"}
           >
             {t("settings.diagnose_copy")}
+          </button>
+        </div>
+        <div className="setting-row">
+          <div>
+            <div className="label">{t("settings.logs")}</div>
+            <div className="hint">{t("settings.logs_desc")}</div>
+          </div>
+          <button
+            className="btn secondary"
+            onClick={exportLogs}
+            disabled={busy === "logs"}
+          >
+            {t("settings.logs_export")}
           </button>
         </div>
       </div>

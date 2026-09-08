@@ -5,7 +5,7 @@
 //! * DeepSeek Harness — `npm install @deepseek-ai/dsh` into `~/.dsh-launcher/dsh`.
 
 use super::detector::{dsh_bin_js_in, detect_dsh_in, npm_cli_for, DSH_PACKAGE};
-use crate::config::{log, runtime_dir};
+use crate::config::{install_log_line, log, runtime_dir};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -148,7 +148,20 @@ fn runtime_node_bin(dir: &std::path::Path) -> Option<PathBuf> {
 }
 
 /// Install the bundled Node.js runtime. Returns the installed version.
+///
+/// Key milestones (download, checksum, extraction, smoke test) are mirrored
+/// to `install.log`, and **any** failure — including download errors — lands
+/// there with a `node install FAILED:` marker so a broken machine can be
+/// diagnosed from the log bundle alone.
 pub async fn install_node(on_progress: Option<Box<dyn Fn(u64, u64) + Send>>) -> Result<String, String> {
+    let res = install_node_inner(on_progress).await;
+    if let Err(e) = &res {
+        install_log_line(&format!("node install FAILED: {e}"));
+    }
+    res
+}
+
+async fn install_node_inner(on_progress: Option<Box<dyn Fn(u64, u64) + Send>>) -> Result<String, String> {
     let version = pick_node_version().await;
     let target = node_dist_target();
     let file = if cfg!(windows) {
@@ -157,6 +170,9 @@ pub async fn install_node(on_progress: Option<Box<dyn Fn(u64, u64) + Send>>) -> 
         format!("node-{version}-{target}.tar.gz")
     };
     let url = node_dist_url(&version);
+    install_log_line(&format!(
+        "node install start: version={version} url={url}"
+    ));
 
     let Some(expected) = expected_sha256(&version, &file).await else {
         return Err(format!(
@@ -194,6 +210,7 @@ pub async fn install_node(on_progress: Option<Box<dyn Fn(u64, u64) + Send>>) -> 
         return Err("Node.js download failed checksum verification. The file may have been corrupted or tampered with — please try again.".into());
     }
     log(&format!("sha256 verified for {file}"));
+    install_log_line(&format!("sha256 verified for {file}"));
 
     // Extract.
     let bytes = std::fs::read(&tmp_file).map_err(|e| e.to_string())?;
@@ -242,6 +259,7 @@ pub async fn install_node(on_progress: Option<Box<dyn Fn(u64, u64) + Send>>) -> 
         Ok(o) if o.status.success() => {
             let v = String::from_utf8_lossy(&o.stdout).trim().to_string();
             log(&format!("bundled node installed: {v} at {}", bin.display()));
+            install_log_line(&format!("node installed: {v} at {}", bin.display()));
             Ok(v.trim_start_matches('v').to_string())
         }
         Ok(o) => Err(format!(
@@ -317,10 +335,12 @@ pub async fn install_dsh(
     on_tail: Option<Box<dyn Fn(String) + Send>>,
 ) -> Result<String, String> {
     if !node.exists() {
-        return Err(format!(
+        let e = format!(
             "Node.js runtime not found at {}. Install Node.js first.",
             node.display()
-        ));
+        );
+        install_log_line(&format!("dsh install FAILED: {e}"));
+        return Err(e);
     }
     // Test-run the chosen runtime before invoking npm — a node that exists
     // but cannot execute (corrupt install, missing DLL, …) fails here with a
@@ -328,17 +348,21 @@ pub async fn install_dsh(
     match std::process::Command::new(node).arg("--version").output() {
         Ok(o) if o.status.success() => {}
         Ok(o) => {
-            return Err(format!(
+            let e = format!(
                 "Node.js at {} does not run (--version, exit {:?}).",
                 node.display(),
                 o.status
-            ));
+            );
+            install_log_line(&format!("dsh install FAILED: {e}"));
+            return Err(e);
         }
         Err(e) => {
-            return Err(format!(
+            let e = format!(
                 "Node.js at {} cannot be executed: {e}",
                 node.display()
-            ));
+            );
+            install_log_line(&format!("dsh install FAILED: {e}"));
+            return Err(e);
         }
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
@@ -356,11 +380,20 @@ pub async fn install_dsh(
     }
 
     let npm = npm_cli_for(node).ok_or_else(|| {
-        format!(
+        let e = format!(
             "Cannot locate npm for the selected Node runtime at {}.",
             node.display()
-        )
+        );
+        install_log_line(&format!("dsh install FAILED: {e}"));
+        e
     })?;
+
+    install_log_line(&format!(
+        "dsh install start: node={} npm-cli={} prefix={}",
+        node.display(),
+        npm.display(),
+        dir.display()
+    ));
 
     log(&format!("running: {} install {DSH_PACKAGE}@latest", node.display()));
 
@@ -383,13 +416,25 @@ pub async fn install_dsh(
         let child = cmd
             .spawn()
             .map_err(|e| format!("start npm: {e}"))?;
-        tokio::time::timeout(
+        let out = tokio::time::timeout(
             Duration::from_secs(NPM_TIMEOUT_SECS),
             child.wait_with_output(),
         )
         .await
         .map_err(|_| "npm install timed out after 10 minutes.".to_string())?
-        .map_err(|e| format!("run npm: {e}"))
+        .map_err(|e| format!("run npm: {e}"))?;
+        // The full command output goes to install.log on EVERY attempt —
+        // success or failure — so a broken machine can be diagnosed from the
+        // log bundle without asking the user to read the console window.
+        install_log_line(&format!(
+            "npm exit: {:?}\n---- npm stdout ----\n{}\n---- npm stderr ----\n{}\n---- end npm output ----",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        ));
+        // Turbofish pins the closure's error type (String) - a bare Ok(out)
+        // leaves it uninferrable from the call sites.
+        Ok::<std::process::Output, String>(out)
     };
 
     let is_transient = |combined: &str| {
@@ -418,6 +463,7 @@ pub async fn install_dsh(
         );
         if is_transient(&combined) {
             log("npm install failed (likely network) — retrying once after 2s…");
+            install_log_line("npm install failed (likely network) — retrying once after 2s…");
             tokio::time::sleep(Duration::from_secs(2)).await;
             (attempt().await?, true)
         } else {
@@ -435,6 +481,7 @@ pub async fn install_dsh(
             cb(tail.clone());
         }
         log(&format!("npm install failed:\n{tail}"));
+        install_log_line("dsh install FAILED — full npm output above");
         return Err(format!(
             "npm install failed. {}\n\nShow Details for the full npm output.",
             if combined.is_empty() {
@@ -453,6 +500,11 @@ pub async fn install_dsh(
         return Err("npm finished but the DSH entry point is missing (unexpected package layout).".into());
     }
     log(&format!("DSH installed: v{} at {}", installed.version, dir.display()));
+    install_log_line(&format!(
+        "DSH installed: v{} at {}",
+        installed.version,
+        dir.display()
+    ));
     Ok(installed.version)
 }
 

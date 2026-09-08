@@ -82,6 +82,11 @@ const en = {
     "Copy a report of exactly what Node.js/npm detection found on this machine — paste it into a bug report.",
   "settings.diagnose_copy": "Copy report",
   "settings.diagnose_copied": "Diagnostics copied to clipboard.",
+  "settings.logs": "Logs",
+  "settings.logs_desc":
+    "Bundle the startup, install and DSH runtime logs plus the environment report into a single zip to send for support. The file is saved to the app data folder and opened in the file manager.",
+  "settings.logs_export": "Export logs",
+  "settings.logs_exported": "Log bundle created: {path}",
   "settings.about": "About",
   "settings.about_desc":
     "DSH Launcher installs and starts DeepSeek Harness for you — no command line needed.",
@@ -168,6 +173,11 @@ const zh: Record<MessageKey, string> = {
     "复制一份报告，记录本机 Node.js/npm 检测的实际结果——可粘贴到问题反馈中。",
   "settings.diagnose_copy": "复制报告",
   "settings.diagnose_copied": "诊断信息已复制到剪贴板。",
+  "settings.logs": "日志",
+  "settings.logs_desc":
+    "将启动、安装、DSH 运行日志与环境诊断报告打包为一个 zip 文件，安装或运行出错时直接发给开发者即可。文件保存在应用数据目录，并自动在文件管理器中打开。",
+  "settings.logs_export": "导出日志",
+  "settings.logs_exported": "日志包已生成：{path}",
   "settings.about": "关于",
   "settings.about_desc":
     "DSH Launcher 帮你自动安装并启动 DeepSeek Harness——无需使用命令行。",

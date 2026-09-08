@@ -80,11 +80,19 @@ xattr -cr "/Applications/DSH Launcher.app"
 ~/.dsh-launcher/
 ├── config.json      # 设置（语言、主题、端口等）
 ├── logs/
-│   ├── launcher.log # 启动器日志
-│   └── harness.log  # DSH 运行日志
+│   ├── launcher.log # 启动器日志（启动、状态变更、事件）
+│   ├── install.log  # 安装日志（Node/DSH/插件安装的完整命令输出）
+│   └── harness.log  # DSH 运行日志（DSH 服务的全部输出）
 ├── runtime/         # Node.js 运行时（按需下载）
 └── dsh/             # DeepSeek Harness 安装目录
 ```
+
+### 安装或运行出错时
+
+在 **设置 → 日志 → 导出日志** 一键打包：会把上面的全部日志、当前配置、
+环境诊断报告（Node/npm/DSH 检测结果）和版本信息压成一个
+`dsh-launcher-logs-<时间>.zip`，并自动在文件管理器中定位到该文件，
+直接把这个 zip 发给开发者即可定位问题。
 
 ---
 
