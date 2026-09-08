@@ -108,6 +108,10 @@ struct Inner {
     pid: Option<u32>,
     host: String,
     port: u16,
+    /// Full URL with auth token, parsed from dsh web output (e.g.
+    /// "http://127.0.0.1:3080/?token=xxx"). None for older dsh versions or
+    /// externally-adopted instances where we never saw the startup banner.
+    token_url: Option<String>,
     error: Option<String>,
     error_details: Option<String>,
     started_at: Option<String>,
@@ -127,6 +131,7 @@ impl Inner {
             pid: None,
             host,
             port,
+            token_url: None,
             error: None,
             error_details: None,
             started_at: None,
@@ -137,12 +142,15 @@ impl Inner {
     }
 
     fn snapshot(&self) -> ProcSnapshot {
+        let url = self.token_url.clone().unwrap_or_else(|| {
+            format!("http://{}:{}", self.host, self.port)
+        });
         ProcSnapshot {
             state: self.state,
             pid: self.pid,
             host: self.host.clone(),
             port: self.port,
-            url: format!("http://{}:{}", self.host, self.port),
+            url,
             error: self.error.clone(),
             error_details: self.error_details.clone(),
             started_at: self.started_at.clone(),
@@ -213,6 +221,7 @@ impl ProcessManager {
                 g.port = st.port;
                 g.pid = Some(st.pid);
                 g.started_at = Some(st.started_at.clone());
+                g.token_url = st.token_url.clone();
                 g.external = false;
                 g.state = ProcessState::Running;
                 g.error = None;
@@ -311,6 +320,7 @@ impl ProcessManager {
             g.error = None;
             g.error_details = None;
             g.tail.clear();
+            g.token_url = None;
             g.stop_requested = false;
             g.started_at = Some(now_stamp());
         }
@@ -377,6 +387,7 @@ impl ProcessManager {
             host: host.clone(),
             port,
             started_at: now_stamp(),
+            token_url: None,
         });
 
         // Output pump: both pipes → harness.log + in-memory tail.
@@ -596,10 +607,36 @@ async fn reader_task(pipe: tokio::process::ChildStdout, inner: Arc<Mutex<Inner>>
     let mut lines = BufReader::new(pipe).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         config::harness_log_line(&line);
-        let mut g = inner.lock().unwrap();
-        g.tail.push_back(line.clone());
-        while g.tail.len() > TAIL_LINES {
-            g.tail.pop_front();
+        let maybe_token = {
+            let mut g = inner.lock().unwrap();
+            g.tail.push_back(line.clone());
+            while g.tail.len() > TAIL_LINES {
+                g.tail.pop_front();
+            }
+            // Parse "dsh web: http://.../?token=..." printed on startup.
+            if g.token_url.is_none() {
+                if let Some(url) = extract_token_url(&line) {
+                    g.token_url = Some(url.clone());
+                    Some((g.pid, g.host.clone(), g.port, g.started_at.clone(), url))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        // Persist the token URL so restarting the launcher keeps the URL valid.
+        if let Some((pid, host, port, started_at, token_url)) = maybe_token {
+            if let Some(pid) = pid {
+                let started_at = started_at.unwrap_or_else(now_stamp);
+                config::write_process_state(&ProcessStateFile {
+                    pid,
+                    host,
+                    port,
+                    started_at,
+                    token_url: Some(token_url),
+                });
+            }
         }
     }
 }
@@ -609,10 +646,98 @@ async fn reader_task_err(pipe: tokio::process::ChildStderr, inner: Arc<Mutex<Inn
     let mut lines = BufReader::new(pipe).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         config::harness_log_line(&line);
-        let mut g = inner.lock().unwrap();
-        g.tail.push_back(line.clone());
-        while g.tail.len() > TAIL_LINES {
-            g.tail.pop_front();
+        let maybe_token = {
+            let mut g = inner.lock().unwrap();
+            g.tail.push_back(line.clone());
+            while g.tail.len() > TAIL_LINES {
+                g.tail.pop_front();
+            }
+            // Also scan stderr for the token URL (npm warnings and other noise
+            // go to stderr, but dsh itself prints the banner to stdout; check
+            // both to be safe across versions).
+            if g.token_url.is_none() {
+                if let Some(url) = extract_token_url(&line) {
+                    g.token_url = Some(url.clone());
+                    Some((g.pid, g.host.clone(), g.port, g.started_at.clone(), url))
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        };
+        if let Some((pid, host, port, started_at, token_url)) = maybe_token {
+            if let Some(pid) = pid {
+                let started_at = started_at.unwrap_or_else(now_stamp);
+                config::write_process_state(&ProcessStateFile {
+                    pid,
+                    host,
+                    port,
+                    started_at,
+                    token_url: Some(token_url),
+                });
+            }
         }
+    }
+}
+
+/// Extract a `http(s)://…/?token=…` URL from a dsh startup banner line.
+///
+/// Example input:
+///   `dsh web: http://127.0.0.1:3080/?token=4Ob4Ii4f0565PO1SgLJFzBkqo02qdw_GkpSrOTI1RAw`
+/// Returns the URL substring, or None if the line does not contain one.
+fn extract_token_url(line: &str) -> Option<String> {
+    // Find "http://" or "https://" in the line.
+    let start = line.find("http://").or_else(|| line.find("https://"))?;
+    // The URL runs until whitespace (or end of string).
+    let rest = &line[start..];
+    let end = rest
+        .find(|c: char| c.is_whitespace())
+        .unwrap_or(rest.len());
+    let url = &rest[..end];
+    // Must contain the token query parameter; otherwise it's an unrelated URL.
+    if url.contains("?token=") || url.contains("&token=") {
+        Some(url.to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_token_url_from_dsh_banner() {
+        let line = "dsh web: http://127.0.0.1:3080/?token=4Ob4Ii4f0565PO1SgLJFzBkqo02qdw_GkpSrOTI1RAw";
+        assert_eq!(
+            extract_token_url(line),
+            Some("http://127.0.0.1:3080/?token=4Ob4Ii4f0565PO1SgLJFzBkqo02qdw_GkpSrOTI1RAw".into())
+        );
+    }
+
+    #[test]
+    fn ignores_plain_urls_without_token() {
+        assert_eq!(extract_token_url("dsh web: http://127.0.0.1:3080/"), None);
+        assert_eq!(extract_token_url("listening on http://127.0.0.1:3080"), None);
+        assert_eq!(extract_token_url("[dsh-file] FileManagerGateway constructed, root=/Users/x/.dsh/profiles/web"), None);
+    }
+
+    #[test]
+    fn extracts_url_even_with_trailing_noise() {
+        let line = "dsh web: http://127.0.0.1:3080/?token=abc123 (press Ctrl+C to stop)";
+        assert_eq!(
+            extract_token_url(line),
+            Some("http://127.0.0.1:3080/?token=abc123".into())
+        );
+    }
+
+    #[test]
+    fn extracts_url_with_other_query_params() {
+        let line = "dsh web: http://localhost:3080/?foo=bar&token=xyz789";
+        assert_eq!(
+            extract_token_url(line),
+            Some("http://localhost:3080/?foo=bar&token=xyz789".into())
+        );
     }
 }

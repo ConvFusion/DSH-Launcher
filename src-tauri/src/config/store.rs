@@ -179,6 +179,9 @@ pub struct ProcessStateFile {
     pub host: String,
     pub port: u16,
     pub started_at: String,
+    /// Full URL with auth token (dsh >= 0.1.2-rc.1). None for older versions.
+    #[serde(default)]
+    pub token_url: Option<String>,
 }
 
 pub fn read_process_state() -> Option<ProcessStateFile> {
