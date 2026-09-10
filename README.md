@@ -19,7 +19,7 @@
 
 ## 🖥️ 界面预览
 
-![DSH Launcher 界面预览：首页 / 插件 / 设置](public/screenshots.png)
+![DSH Launcher 界面预览：首页 / 插件 / 设置 / 更新](public/screenshots.png)
 
 ---
 
