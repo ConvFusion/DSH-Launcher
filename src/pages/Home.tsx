@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type {
   EnvProgress,
   LauncherStatus,
@@ -21,11 +21,23 @@ interface Props {
   envProgress: EnvProgress | null;
   /** npm registry info: latest version + whether an update is available. */
   updateInfo: UpdateInfo | null;
+  /** Live console log of the install/update command (`dsh://update`). */
+  updateLines: string[];
+  /** Set when the last update attempt failed; keeps the log on screen. */
+  updateError: string | null;
+  onDismissUpdateLog: () => void;
   onMainAction: () => void;
   onUpdate: () => void;
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
+}
+
+/** "m:ss" elapsed-time label, so a quiet log still looks alive. */
+function formatElapsed(totalSeconds: number) {
+  const m = Math.floor(totalSeconds / 60);
+  const s = totalSeconds % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 // canOpen is computed in App and drives the main action (install vs open);
@@ -37,6 +49,9 @@ export default function Home({
   busyPhase,
   envProgress,
   updateInfo,
+  updateLines,
+  updateError,
+  onDismissUpdateLog,
   onMainAction,
   onUpdate,
   onStart,
@@ -47,12 +62,35 @@ export default function Home({
   const env = status.env;
   const procState = status.process.state;
   const [copied, setCopied] = useState(false);
+  const [elapsed, setElapsed] = useState(0);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const logRef = useRef<HTMLPreElement | null>(null);
 
   const isBusy = busyPhase !== null;
   const isInstalled = env.ready; // Node + DSH both present
   const isRunning = procState === "running";
   const isExternal = status.process.external;
+
+  const isUpdating = busyPhase === "updating";
+  // The log panel lives on while the update runs, and stays after a failure so
+  // the npm output that explains it is still readable.
+  const showUpdateLog = isUpdating || (updateError !== null && updateLines.length > 0);
+
+  // Elapsed-time ticker: npm can be silent for long stretches on a slow
+  // network, and a frozen log otherwise looks like a hang.
+  useEffect(() => {
+    if (!isUpdating) return;
+    setElapsed(0);
+    const t0 = Date.now();
+    const id = setInterval(() => setElapsed(Math.floor((Date.now() - t0) / 1000)), 1000);
+    return () => clearInterval(id);
+  }, [isUpdating]);
+
+  // Follow the tail of the log as lines stream in.
+  useEffect(() => {
+    const el = logRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [updateLines]);
 
   // ---- Main button label ----
   let mainLabel: string;
@@ -199,9 +237,45 @@ export default function Home({
       {procState === "error" && status.process.error && !isBusy && (
         <p className="progress error">{status.process.error}</p>
       )}
-      {isBusy && envProgress?.message && (
+      {isBusy && !isUpdating && envProgress?.message && (
         <p className="progress">{envProgress.message}</p>
       )}
+
+      {/* Live console log of the install/update command. */}
+      {showUpdateLog && (
+        <div className="update-log">
+          <div className="update-log-head">
+            {isUpdating && <span className="spinner" />}
+            <span className="update-log-title">
+              {updateError ? t("home.update_failed") : t("home.update_log")}
+            </span>
+            {isUpdating && <span className="elapsed">{formatElapsed(elapsed)}</span>}
+            {!isUpdating && (
+              <button
+                className="update-log-dismiss"
+                onClick={onDismissUpdateLog}
+                title={t("home.update_log_dismiss")}
+                aria-label={t("home.update_log_dismiss")}
+              >
+                ✕
+              </button>
+            )}
+          </div>
+          {updateError && <p className="progress error">{updateError}</p>}
+          <pre className="plugin-output" ref={logRef}>
+            {updateLines.length > 0
+              ? updateLines.join("\n")
+              : t("home.update_waiting")}
+          </pre>
+        </div>
+      )}
+
+      {/* The launcher's own version, at the foot of the home column — bug
+          reports and support requests should be able to name the exact build.
+          Selectable so it can be copied. */}
+      <div className="launcher-version">
+        {t("home.launcher_version", { version: status.launcher_version })}
+      </div>
     </div>
   );
 }

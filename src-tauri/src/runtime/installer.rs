@@ -7,10 +7,49 @@
 use super::detector::{dsh_bin_js_in, detect_dsh_in, npm_cli_for, DSH_PACKAGE};
 use crate::config::{install_log_line, log, runtime_dir};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Fallback Node version used when nodejs.org cannot be reached for its index.
 pub const NODE_FALLBACK_VERSION: &str = "v22.14.0";
+
+/// Receives every output line of an install/update command **as it is
+/// produced**, so the UI can show the live console log instead of waiting for
+/// npm to exit. `Arc` because the stdout and stderr reader tasks share it.
+pub type LineSink = Arc<dyn Fn(String) + Send + Sync>;
+
+/// Push one line to a sink, if the caller supplied one.
+fn emit_line(sink: &Option<LineSink>, line: impl Into<String>) {
+    if let Some(cb) = sink.as_ref() {
+        cb(line.into());
+    }
+}
+
+/// Read a child pipe line by line, appending the full transcript to `buf`
+/// (that is what `install.log` records) while forwarding each line to the UI
+/// sink live. Returns the task handle so the caller can drain it before
+/// judging the transcript.
+fn spawn_line_reader<R>(
+    pipe: R,
+    buf: Arc<Mutex<String>>,
+    sink: Option<LineSink>,
+) -> tokio::task::JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut lines = tokio::io::BufReader::new(pipe).lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            {
+                let mut b = buf.lock().unwrap();
+                b.push_str(&line);
+                b.push('\n');
+            }
+            emit_line(&sink, line);
+        }
+    })
+}
 
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
@@ -322,6 +361,95 @@ fn extract_zip(bytes: &[u8], dest: &std::path::Path) -> Result<(), String> {
 
 const NPM_TIMEOUT_SECS: u64 = 10 * 60;
 
+/// Dependencies whose lifecycle scripts the install genuinely needs.
+///
+/// npm (11.19+) only runs a dependency's `install`/`postinstall` when an
+/// explicit `allowScripts` policy covers it; anything uncovered is silently
+/// skipped as "unreviewed". Two of DSH's dependencies need theirs: node-pty
+/// builds/stages its native prebuilds, and
+/// `@deepseek-ai/dsh-subprocess-local` ships a postinstall that restores the
+/// executable bit npm's tarball handling strips from node-pty's prebuilt
+/// `spawn-helper` — without it the helper is not executable and local
+/// subprocesses break.
+///
+/// A user-level `.npmrc` that restricts scripts to an unrelated allowlist
+/// (e.g. `allow-scripts=some-other-pkg`) would otherwise skip both and leave a
+/// subtly broken install. Declaring them in the **project** `package.json` is
+/// what npm's own error prescribes, and per npm's precedence rules the project
+/// package.json layer wins over `.npmrc`.
+///
+/// If a future DSH release adds another script-bearing dependency it will be
+/// skipped with npm's advisory warning rather than failing the install — the
+/// warning shows up in the update log, so it stays visible.
+const DSH_SCRIPT_PACKAGES: [&str; 2] = [
+    "node-pty",
+    "@deepseek-ai/dsh-subprocess-local",
+];
+
+/// Environment variables npm exports to child processes to carry its resolved
+/// configuration. The launcher may itself have been started from an npm script
+/// (`npm run tauri dev`), and leaking these into the DSH install makes npm read
+/// the inherited `allow-scripts` as a *command-line* flag — which it rejects
+/// outright in a project-scoped install:
+///
+/// ```text
+/// npm error code EALLOWSCRIPTS
+/// npm error --allow-scripts is not allowed in project-scoped installs.
+/// ```
+///
+/// Only the script-policy keys are stripped, so a registry or proxy the user
+/// deliberately exported still reaches the child; and `.npmrc` is untouched, so
+/// their real configuration is still honoured.
+const NPM_SCRIPT_POLICY_VARS: [&str; 5] = [
+    "npm_config_allow_scripts",
+    "npm_config_ignore_scripts",
+    "npm_config_strict_allow_scripts",
+    "npm_config_allow_scripts_pin",
+    "npm_config_dangerously_allow_all_scripts",
+];
+
+/// Create/repair the install root's `package.json`, preserving whatever is
+/// already there (npm's npx cache keeps its own `_npx` bookkeeping in this
+/// file) and merging in the `allowScripts` policy from [`DSH_SCRIPT_PACKAGES`].
+fn ensure_install_manifest(manifest: &std::path::Path) -> Result<(), String> {
+    let mut doc: serde_json::Value = std::fs::read_to_string(manifest)
+        .ok()
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .filter(serde_json::Value::is_object)
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    let obj = doc.as_object_mut().expect("checked above");
+    // Identity of the launcher-managed project root — only filled in when the
+    // file did not exist (an npx-cache manifest keeps its own name/version).
+    obj.entry("name")
+        .or_insert_with(|| serde_json::json!("dsh-launcher-runtime"));
+    obj.entry("private").or_insert_with(|| serde_json::json!(true));
+    obj.entry("version").or_insert_with(|| serde_json::json!("0.1.1"));
+
+    let allow = obj
+        .entry("allowScripts")
+        .or_insert_with(|| serde_json::json!({}));
+    if !allow.is_object() {
+        // An empty array (the shape our own project uses) means "no policy";
+        // replace it with the map form npm actually reads.
+        *allow = serde_json::json!({});
+    }
+    let map = allow.as_object_mut().expect("just ensured");
+    for name in DSH_SCRIPT_PACKAGES {
+        map.entry(name.to_string())
+            .or_insert_with(|| serde_json::json!(true));
+    }
+
+    std::fs::write(
+        manifest,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&doc).unwrap_or_default()
+        ),
+    )
+    .map_err(|e| format!("write {}: {e}", manifest.display()))
+}
+
 /// Install (or update) the DSH package using the given Node runtime, into
 /// `dir` (the folder that will contain `node_modules/@deepseek-ai/dsh`).
 /// Returns the installed version.
@@ -329,10 +457,16 @@ const NPM_TIMEOUT_SECS: u64 = 10 * 60;
 /// **Ordering guarantee:** DSH is installed with the npm that ships with the
 /// Node runtime passed in — callers must make sure Node.js is installed and
 /// detected *first*. We refuse to run without it.
+///
+/// `on_line` receives the command line and then **every** npm output line as
+/// it is produced, which is what lets the UI show a live console log during an
+/// install/update. `on_fail_tail` is the older hook: the last npm lines, handed
+/// over only when the command failed (used to fill in "Show Details").
 pub async fn install_dsh(
     node: &std::path::Path,
     dir: &std::path::Path,
-    on_tail: Option<Box<dyn Fn(String) + Send>>,
+    on_line: Option<LineSink>,
+    on_fail_tail: Option<Box<dyn Fn(String) + Send>>,
 ) -> Result<String, String> {
     if !node.exists() {
         let e = format!(
@@ -367,17 +501,11 @@ pub async fn install_dsh(
     }
     std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
 
-    // Minimal package.json so npm treats this as a project root.
+    // The install root is a project (npm needs a package.json to treat the
+    // `--prefix` directory as its project root), and it carries the
+    // `allowScripts` policy the install needs — see `ensure_install_manifest`.
     let manifest = dir.join("package.json");
-    if !manifest.exists() {
-        let pkg = serde_json::json!({
-            "name": "dsh-launcher-runtime",
-            "private": true,
-            "version": "0.1.1"
-        });
-        std::fs::write(&manifest, serde_json::to_string_pretty(&pkg).unwrap_or_default())
-            .map_err(|e| e.to_string())?;
-    }
+    ensure_install_manifest(&manifest)?;
 
     let npm = npm_cli_for(node).ok_or_else(|| {
         let e = format!(
@@ -395,11 +523,51 @@ pub async fn install_dsh(
         dir.display()
     ));
 
+    // npm runs dependency lifecycle scripts through `sh -c`, so **`node` must
+    // be resolvable by name** — not just as the absolute path we spawn npm
+    // with. DSH ships packages that rely on this (node-pty's `install`, and
+    // `@deepseek-ai/dsh-subprocess-local`'s `postinstall:
+    // node scripts/ensure-spawn-helper.mjs`). A GUI-launched app inherits a
+    // minimal PATH (`/usr/bin:/bin:…`) where an nvm or Homebrew Node.js is
+    // invisible, so those scripts died with `sh: node: command not found`
+    // (exit 127) and aborted the 0.1.5 upgrade. Prepend the runtime we chose —
+    // the same thing `ProcessManager::start` and the plugin installer do.
+    let node_dir = node
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_default();
+    let sep = if cfg!(windows) { ";" } else { ":" };
+    let old_path = std::env::var("PATH").unwrap_or_default();
+    let child_path = format!("{}{}{old_path}", node_dir.display(), sep);
+
+    install_log_line(&format!(
+        "install root manifest: {} (allowScripts: {})",
+        manifest.display(),
+        DSH_SCRIPT_PACKAGES.join(", ")
+    ));
+
     log(&format!("running: {} install {DSH_PACKAGE}@latest", node.display()));
+
+    // Show the exact command as the first line of the live log, so the user
+    // sees what is running (and can paste it into a terminal if it fails).
+    emit_line(
+        &on_line,
+        format!(
+            "$ {} {} install --prefix {} --no-audit --no-fund --loglevel=warn {DSH_PACKAGE}@latest",
+            node.display(),
+            npm.display(),
+            dir.display()
+        ),
+    );
 
     // One attempt: spawn npm and wait (with a hard timeout). A timeout is a
     // hard error and is NOT retried — a hung network would otherwise eat
     // twice the timeout.
+    //
+    // npm's stdout/stderr are read **line by line while it runs** and pushed
+    // to `on_line`, so the UI shows progress instead of a frozen spinner for
+    // the minutes a cold install can take. The same lines are accumulated so
+    // the full transcript still lands in install.log exactly as before.
     let attempt = || async {
         let mut cmd = tokio::process::Command::new(node);
         cmd.arg(&npm)
@@ -413,28 +581,81 @@ pub async fn install_dsh(
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
-        let child = cmd
+        // Node.js must be on PATH for npm's own lifecycle scripts — see above.
+        cmd.env("PATH", &child_path);
+        // Drop any npm script policy inherited from whoever launched us, so the
+        // policy that applies is the one in the install root's package.json.
+        for (key, _) in std::env::vars() {
+            let lower = key.to_ascii_lowercase();
+            if NPM_SCRIPT_POLICY_VARS.contains(&lower.as_str()) {
+                cmd.env_remove(&key);
+            }
+        }
+        let mut child = cmd
             .spawn()
             .map_err(|e| format!("start npm: {e}"))?;
-        let out = tokio::time::timeout(
+
+        let stdout_buf = Arc::new(Mutex::new(String::new()));
+        let stderr_buf = Arc::new(Mutex::new(String::new()));
+        let mut readers = Vec::new();
+        if let Some(pipe) = child.stdout.take() {
+            readers.push(spawn_line_reader(
+                pipe,
+                Arc::clone(&stdout_buf),
+                on_line.clone(),
+            ));
+        }
+        if let Some(pipe) = child.stderr.take() {
+            readers.push(spawn_line_reader(
+                pipe,
+                Arc::clone(&stderr_buf),
+                on_line.clone(),
+            ));
+        }
+
+        let status = match tokio::time::timeout(
             Duration::from_secs(NPM_TIMEOUT_SECS),
-            child.wait_with_output(),
+            child.wait(),
         )
         .await
-        .map_err(|_| "npm install timed out after 10 minutes.".to_string())?
-        .map_err(|e| format!("run npm: {e}"))?;
+        {
+            Err(_) => {
+                // Don't leave a stray npm behind on a hung network.
+                let _ = child.kill().await;
+                emit_line(
+                    &on_line,
+                    format!("[launcher] npm install timed out after {NPM_TIMEOUT_SECS}s — stopped."),
+                );
+                return Err("npm install timed out after 10 minutes.".to_string());
+            }
+            Ok(Err(e)) => return Err(format!("run npm: {e}")),
+            Ok(Ok(s)) => s,
+        };
+
+        // The pipes reach EOF when the child exits; drain the readers so the
+        // transcript is complete before it is judged and written to the log.
+        for r in readers {
+            let _ = r.await;
+        }
+
+        let stdout = stdout_buf.lock().unwrap().clone();
+        let stderr = stderr_buf.lock().unwrap().clone();
         // The full command output goes to install.log on EVERY attempt —
         // success or failure — so a broken machine can be diagnosed from the
         // log bundle without asking the user to read the console window.
         install_log_line(&format!(
             "npm exit: {:?}\n---- npm stdout ----\n{}\n---- npm stderr ----\n{}\n---- end npm output ----",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stdout),
-            String::from_utf8_lossy(&out.stderr),
+            status.code(),
+            stdout,
+            stderr,
         ));
         // Turbofish pins the closure's error type (String) - a bare Ok(out)
         // leaves it uninferrable from the call sites.
-        Ok::<std::process::Output, String>(out)
+        Ok::<std::process::Output, String>(std::process::Output {
+            status,
+            stdout: stdout.into_bytes(),
+            stderr: stderr.into_bytes(),
+        })
     };
 
     let is_transient = |combined: &str| {
@@ -464,6 +685,10 @@ pub async fn install_dsh(
         if is_transient(&combined) {
             log("npm install failed (likely network) — retrying once after 2s…");
             install_log_line("npm install failed (likely network) — retrying once after 2s…");
+            emit_line(
+                &on_line,
+                "[launcher] npm install failed (likely network) — retrying once…",
+            );
             tokio::time::sleep(Duration::from_secs(2)).await;
             (attempt().await?, true)
         } else {
@@ -477,11 +702,18 @@ pub async fn install_dsh(
     let tail: String = combined.lines().rev().take(15).collect::<Vec<_>>().join("\n");
 
     if !out.status.success() {
-        if let Some(cb) = on_tail {
+        if let Some(cb) = on_fail_tail {
             cb(tail.clone());
         }
         log(&format!("npm install failed:\n{tail}"));
         install_log_line("dsh install FAILED — full npm output above");
+        emit_line(
+            &on_line,
+            format!(
+                "[launcher] npm install failed (exit {:?}) — see the lines above.",
+                out.status.code()
+            ),
+        );
         return Err(format!(
             "npm install failed. {}\n\nShow Details for the full npm output.",
             if combined.is_empty() {
@@ -505,6 +737,10 @@ pub async fn install_dsh(
         installed.version,
         dir.display()
     ));
+    emit_line(
+        &on_line,
+        format!("[launcher] DeepSeek Harness v{} installed.", installed.version),
+    );
     Ok(installed.version)
 }
 

@@ -263,7 +263,10 @@ impl AppState {
                 });
                 let _version = {
                     let target = self.dsh_target_dir();
-                    runtime::installer::install_dsh(&node.path, &target, Some(on_tail))
+                    // First-run install keeps the "tail into Show Details"
+                    // behaviour; the live console log is wired for the update
+                    // path (see `install_dsh_package`).
+                    runtime::installer::install_dsh(&node.path, &target, None, Some(on_tail))
                         .await
                         .map_err(|e| (e, Some("Check the Details for the npm output.".into())))?
                 };

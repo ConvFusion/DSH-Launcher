@@ -99,18 +99,19 @@ pub async fn install_dsh_package(
     let node = state
         .node()
         .ok_or_else(|| "No compatible Node.js runtime is available yet.".to_string())?;
-    let on_tail: Box<dyn Fn(String) + Send> = Box::new({
+    // Stream the command and every npm output line to the UI (`dsh://update`)
+    // so the home page can show a live console log while the button reads
+    // "Updating…" — a cold npm install can take minutes of otherwise silent
+    // waiting.
+    let on_line: runtime::installer::LineSink = {
         let app = app.clone();
-        move |tail| {
-            let _ = app.emit(
-                "dsh://env",
-                EnvProgress::fail("dsh", "npm is reporting errors…", Some(tail)),
-            );
-        }
-    });
+        std::sync::Arc::new(move |line: String| {
+            let _ = app.emit("dsh://update", line);
+        })
+    };
     let target = state.dsh_target_dir();
     let version =
-        runtime::installer::install_dsh(&node.path, &target, Some(on_tail)).await?;
+        runtime::installer::install_dsh(&node.path, &target, Some(on_line), None).await?;
     state.invalidate_env_cache();
     let snap = state.proc.snapshot();
     let _ = app.emit("dsh://status", status_payload(&state, &snap));

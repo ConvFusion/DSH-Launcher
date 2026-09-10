@@ -179,10 +179,6 @@ export default function Settings({ status, notify, onChanged }: Props) {
       {/* About + Diagnostics */}
       <div className="card section">
         <h3>{t("settings.about")}</h3>
-        <div className="setting-row" style={{ paddingTop: 0 }}>
-          <span className="label">DSH Launcher</span>
-          <span className="v">v{status.launcher_version}</span>
-        </div>
         <p className="desc">{t("settings.about_desc")}</p>
         <div className="setting-row">
           <div>

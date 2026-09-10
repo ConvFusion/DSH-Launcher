@@ -26,6 +26,14 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  /**
+   * Live console log of the running DSH install/update command
+   * (`dsh://update`), shown on the home page while the button reads
+   * "Updating…" — and kept on screen if it failed, so the reason stays
+   * readable after the toast disappears.
+   */
+  const [updateLines, setUpdateLines] = useState<string[]>([]);
+  const [updateError, setUpdateError] = useState<string | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const notify = useCallback((msg: string) => {
@@ -46,9 +54,18 @@ export default function App() {
     refresh();
     const un1 = listen<LauncherStatus>("dsh://status", (e) => setStatus(e.payload));
     const un2 = listen<EnvProgress>("dsh://env", (e) => setEnvProgress(e.payload));
+    // Console output of the DSH install/update command, one line per event.
+    const un3 = listen<string>("dsh://update", (e) => {
+      setUpdateLines((prev) => {
+        const next = [...prev, e.payload];
+        // Keep the tail bounded: npm can be very chatty on a cold install.
+        return next.length > 500 ? next.slice(next.length - 500) : next;
+      });
+    });
     return () => {
       un1.then((f) => f());
       un2.then((f) => f());
+      un3.then((f) => f());
     };
   }, [refresh]);
 
@@ -117,6 +134,10 @@ export default function App() {
         setView={setView}
         toast={toast}
         updateInfo={updateInfo}
+        updateLines={updateLines}
+        updateError={updateError}
+        setUpdateLines={setUpdateLines}
+        setUpdateError={setUpdateError}
         checkUpdate={checkUpdate}
         refresh={refresh}
         onRefresh={handleRefresh}
@@ -136,6 +157,10 @@ function AppShell({
   setView,
   toast,
   updateInfo,
+  updateLines,
+  updateError,
+  setUpdateLines,
+  setUpdateError,
   checkUpdate,
   refresh,
   onRefresh,
@@ -150,6 +175,10 @@ function AppShell({
   setView: (v: View) => void;
   toast: string | null;
   updateInfo: UpdateInfo | null;
+  updateLines: string[];
+  updateError: string | null;
+  setUpdateLines: (lines: string[]) => void;
+  setUpdateError: (err: string | null) => void;
   checkUpdate: () => void;
   refresh: () => Promise<void>;
   onRefresh: () => void;
@@ -248,6 +277,9 @@ function AppShell({
   async function updateDsh() {
     const wasRunning = currentStatus.process.state === "running";
     setBusyPhase("updating");
+    // Fresh log for this attempt; the backend streams every npm line into it.
+    setUpdateLines([]);
+    setUpdateError(null);
     try {
       if (wasRunning) await api.stopDsh();
       const version = await api.installDsh();
@@ -257,6 +289,9 @@ function AppShell({
       checkUpdate();
       notify(t("home.updated", { version }));
     } catch (e) {
+      // Keep the streamed console log on screen: the toast is gone in a few
+      // seconds, but the npm output is what explains the failure.
+      setUpdateError(String(e));
       notify(String(e));
     } finally {
       setBusyPhase(null);
@@ -308,6 +343,12 @@ function AppShell({
             busyPhase={busyPhase}
             envProgress={envProgress}
             updateInfo={updateInfo}
+            updateLines={updateLines}
+            updateError={updateError}
+            onDismissUpdateLog={() => {
+              setUpdateLines([]);
+              setUpdateError(null);
+            }}
             onMainAction={mainAction}
             onUpdate={updateDsh}
             onStart={startService}
