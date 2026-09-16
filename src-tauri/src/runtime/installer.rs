@@ -4,14 +4,20 @@
 //!   `~/.dsh-launcher/runtime/`. The user's system Node is never touched.
 //! * DeepSeek Harness — `npm install @deepseek-ai/dsh` into `~/.dsh-launcher/dsh`.
 
-use super::detector::{dsh_bin_js_in, detect_dsh_in, npm_cli_for, DSH_PACKAGE};
+use super::detector::{
+    dsh_bin_js_in, detect_dsh_in, node_compatible, npm_cli_for, DSH_PACKAGE,
+};
 use crate::config::{install_log_line, log, runtime_dir};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// Fallback Node version used when nodejs.org cannot be reached for its index.
-pub const NODE_FALLBACK_VERSION: &str = "v22.14.0";
+///
+/// Must itself satisfy [`node_compatible`] — the old `v22.14.0` did not, so an
+/// offline machine would have been handed a runtime that installs DSH and then
+/// cannot execute it.
+pub const NODE_FALLBACK_VERSION: &str = "v22.19.0";
 
 /// Receives every output line of an install/update command **as it is
 /// produced**, so the UI can show the live console log instead of waiting for
@@ -76,7 +82,9 @@ fn node_dist_target() -> String {
     format!("{os}-{arch}")
 }
 
-/// Pick the newest LTS Node (major >= 20) from nodejs.org, else the fallback.
+/// Pick the newest LTS Node **that can run DSH** from nodejs.org, else the
+/// fallback. nodejs.org's index is newest-first, so the first match is the
+/// newest compatible release.
 async fn pick_node_version() -> String {
     const INDEX: &str = "https://nodejs.org/dist/index.json";
     if let Ok(resp) = http_client().get(INDEX).send().await {
@@ -84,13 +92,7 @@ async fn pick_node_version() -> String {
             for entry in &v {
                 let Some(ver) = entry.get("version").and_then(|x| x.as_str()) else { continue };
                 let lts = entry.get("lts").map(|x| !x.is_null()).unwrap_or(false);
-                let major = ver
-                    .trim_start_matches('v')
-                    .split('.')
-                    .next()
-                    .and_then(|m| m.parse::<u32>().ok())
-                    .unwrap_or(0);
-                if lts && major >= 20 {
+                if lts && node_compatible(ver.trim_start_matches('v')) {
                     return ver.to_string();
                 }
             }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type {
+  ConsoleKind,
   EnvProgress,
   LauncherStatus,
   MainPhase,
@@ -23,8 +24,10 @@ interface Props {
   updateInfo: UpdateInfo | null;
   /** Live console log of the install/update command (`dsh://update`). */
   updateLines: string[];
-  /** Set when the last update attempt failed; keeps the log on screen. */
+  /** Set when the last install/update attempt failed; keeps the log on screen. */
   updateError: string | null;
+  /** Which command the log belongs to, so the panel is titled correctly. */
+  consoleKind: ConsoleKind | null;
   onDismissUpdateLog: () => void;
   onMainAction: () => void;
   onUpdate: () => void;
@@ -51,6 +54,7 @@ export default function Home({
   updateInfo,
   updateLines,
   updateError,
+  consoleKind,
   onDismissUpdateLog,
   onMainAction,
   onUpdate,
@@ -72,19 +76,30 @@ export default function Home({
   const isExternal = status.process.external;
 
   const isUpdating = busyPhase === "updating";
-  // The log panel lives on while the update runs, and stays after a failure so
+  const isInstalling = busyPhase === "installing";
+  // A first install runs the same kind of long npm command as an update, so it
+  // gets the same live console panel.
+  const consoleBusy = isUpdating || isInstalling;
+  // The log panel lives on while the command runs, and stays after a failure so
   // the npm output that explains it is still readable.
-  const showUpdateLog = isUpdating || (updateError !== null && updateLines.length > 0);
+  const showUpdateLog = consoleBusy || (updateError !== null && updateLines.length > 0);
+  const logTitle = updateError
+    ? consoleKind === "install"
+      ? t("home.install_failed")
+      : t("home.update_failed")
+    : consoleKind === "install"
+      ? t("home.install_log")
+      : t("home.update_log");
 
   // Elapsed-time ticker: npm can be silent for long stretches on a slow
   // network, and a frozen log otherwise looks like a hang.
   useEffect(() => {
-    if (!isUpdating) return;
+    if (!consoleBusy) return;
     setElapsed(0);
     const t0 = Date.now();
     const id = setInterval(() => setElapsed(Math.floor((Date.now() - t0) / 1000)), 1000);
     return () => clearInterval(id);
-  }, [isUpdating]);
+  }, [consoleBusy]);
 
   // Follow the tail of the log as lines stream in.
   useEffect(() => {
@@ -245,12 +260,10 @@ export default function Home({
       {showUpdateLog && (
         <div className="update-log">
           <div className="update-log-head">
-            {isUpdating && <span className="spinner" />}
-            <span className="update-log-title">
-              {updateError ? t("home.update_failed") : t("home.update_log")}
-            </span>
-            {isUpdating && <span className="elapsed">{formatElapsed(elapsed)}</span>}
-            {!isUpdating && (
+            {consoleBusy && <span className="spinner" />}
+            <span className="update-log-title">{logTitle}</span>
+            {consoleBusy && <span className="elapsed">{formatElapsed(elapsed)}</span>}
+            {!consoleBusy && (
               <button
                 className="update-log-dismiss"
                 onClick={onDismissUpdateLog}

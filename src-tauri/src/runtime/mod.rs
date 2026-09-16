@@ -69,7 +69,7 @@ pub struct EnvStatus {
 impl EnvStatus {
     pub fn from_parts(node: Option<&NodeInfo>, dsh: Option<&DshInfo>) -> Self {
         let ready = node
-            .map(|n| detector::node_major(&n.version).map(|m| m >= detector::MIN_NODE_MAJOR).unwrap_or(false))
+            .map(|n| detector::node_compatible(&n.version))
             .unwrap_or(false)
             && dsh.is_some();
         Self {

@@ -28,6 +28,8 @@ const en = {
   "home.updated": "DeepSeek Harness updated to v{version}.",
   "home.update_log": "Update log",
   "home.update_failed": "Update failed",
+  "home.install_log": "Install log",
+  "home.install_failed": "Install failed",
   "home.update_waiting": "Waiting for command output…",
   "home.update_log_dismiss": "Dismiss update log",
   "home.launcher_version": "DSH Launcher v{version}",
@@ -64,6 +66,12 @@ const en = {
   "plugins.restart_now": "Restart now",
   "plugins.restarted": "DeepSeek Harness restarted.",
   "plugins.install_failed": "Install failed — see the log above.",
+  "plugins.rec_title": "Recommended plugins",
+  "plugins.rec_additive": "DSH Additive",
+  "plugins.rec_additive_desc": "Customize your own LOGO",
+  "plugins.rec_research": "Research Agent",
+  "plugins.rec_research_desc": "ConvFusion embraces Harness",
+  "plugins.rec_hint": "Click a plugin to fill its full install command into the input box.",
 
   // Settings
   "settings.language": "Language",
@@ -124,6 +132,8 @@ const zh: Record<MessageKey, string> = {
   "home.updated": "DeepSeek Harness 已更新到 v{version}。",
   "home.update_log": "更新日志",
   "home.update_failed": "更新失败",
+  "home.install_log": "安装日志",
+  "home.install_failed": "安装失败",
   "home.update_waiting": "等待命令输出…",
   "home.update_log_dismiss": "关闭更新日志",
   "home.launcher_version": "DSH Launcher v{version}",
@@ -160,6 +170,12 @@ const zh: Record<MessageKey, string> = {
   "plugins.restart_now": "立即重启",
   "plugins.restarted": "DeepSeek Harness 已重启。",
   "plugins.install_failed": "安装失败，请查看上方日志。",
+  "plugins.rec_title": "推荐插件",
+  "plugins.rec_additive": "DSH添加剂",
+  "plugins.rec_additive_desc": "定制自己的LOGO",
+  "plugins.rec_research": "科研智能体",
+  "plugins.rec_research_desc": "ConvFusion拥抱Harness",
+  "plugins.rec_hint": "点击插件即可将完整安装命令填入输入框。",
 
   // Settings
   "settings.language": "语言",

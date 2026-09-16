@@ -41,6 +41,13 @@ pub fn dsh_dir() -> PathBuf {
     data_dir().join("dsh")
 }
 
+/// CLI tools the launcher installs for its own use (currently pnpm, which
+/// `dsh plugin` forwards to). Kept in the launcher's data dir so a global
+/// install never touches the user's own Node.js prefix.
+pub fn tools_dir() -> PathBuf {
+    data_dir().join("tools")
+}
+
 pub fn config_path() -> PathBuf {
     data_dir().join("config.json")
 }

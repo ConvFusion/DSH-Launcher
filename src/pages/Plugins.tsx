@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../api";
 import { useI18n } from "../i18n";
+import type { MessageKey } from "../i18n/messages";
 
 interface Props {
   notify: (msg: string) => void;
@@ -9,6 +10,30 @@ interface Props {
 }
 
 type DoneState = null | "ok" | "err";
+
+/** Our own plugins, offered under the install button as one-click links. */
+const RECOMMENDED_PLUGINS: { label: MessageKey; desc: MessageKey; repo: string }[] = [
+  {
+    label: "plugins.rec_additive",
+    desc: "plugins.rec_additive_desc",
+    repo: "https://github.com/ConvFusion/DSH-additive",
+  },
+  {
+    label: "plugins.rec_research",
+    desc: "plugins.rec_research_desc",
+    repo: "https://github.com/ConvFusion/ConvFusion-dsh",
+  },
+];
+
+/**
+ * Full install command for a recommended plugin repo.
+ *
+ * `dsh plugin` declares `--profile <name>` as a *required* option, and `web`
+ * is the profile this launcher boots; without it the CLI exits with
+ * `error: required option '--profile <name>' not specified`.
+ */
+const installCommand = (repo: string) =>
+  `npx @deepseek-ai/dsh plugin --profile web add ${repo}`;
 
 function formatElapsed(totalSeconds: number) {
   const m = Math.floor(totalSeconds / 60);
@@ -93,6 +118,14 @@ export default function Plugins({ notify, onChanged }: Props) {
     }
   }
 
+  // One-click: fill the input with the full install command for one of our
+  // own plugins, so the user only has to press Install.
+  function fillRecommended(repo: string) {
+    if (busy) return;
+    setName(installCommand(repo));
+    if (done) setDone(null);
+  }
+
   async function restartNow() {
     if (busy) return;
     setBusy(true);
@@ -146,6 +179,31 @@ export default function Plugins({ notify, onChanged }: Props) {
             {busy && <span className="spinner" />}
             {t("plugins.install")}
           </button>
+        </div>
+
+        {/* Recommended plugins: one-click fill of the full install command. */}
+        <div className="plugin-recommended">
+          <div className="recommended-title">{t("plugins.rec_title")}</div>
+          <ul className="recommended-list">
+            {RECOMMENDED_PLUGINS.map((p) => (
+              <li key={p.repo}>
+                <button
+                  type="button"
+                  className="recommended-card"
+                  disabled={busy}
+                  title={installCommand(p.repo)}
+                  onClick={() => fillRecommended(p.repo)}
+                >
+                  <span className="recommended-name">
+                    {t(p.label)}
+                    <span className="recommended-desc"> - {t(p.desc)}</span>
+                  </span>
+                  <span className="recommended-repo">{p.repo}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+          <div className="recommended-hint">{t("plugins.rec_hint")}</div>
         </div>
 
         {willRun && !busy && (

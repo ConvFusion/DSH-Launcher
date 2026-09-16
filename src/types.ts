@@ -111,3 +111,10 @@ export interface EnvReport {
 
 /** What the home-page buttons are doing right now. */
 export type MainPhase = "installing" | "opening" | "updating" | "starting" | "stopping" | "restarting";
+
+/**
+ * Which command the home page's live console log belongs to — a first install
+ * or an update — so the panel stays titled correctly even after a failure,
+ * when the busy phase is already over.
+ */
+export type ConsoleKind = "install" | "update";

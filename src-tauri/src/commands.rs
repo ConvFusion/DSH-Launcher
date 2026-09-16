@@ -208,6 +208,10 @@ async fn start_dsh_inner(
     };
     let outcome = state.proc.start(app, &node, &dsh).await;
     if outcome.ok && open_browser {
+        // The harness prints its `?token=…` banner just after it starts
+        // answering HTTP, so the snapshot taken above can still hold the bare
+        // URL — wait briefly so the browser opens an authorized URL.
+        let _ = state.proc.wait_for_token_url().await;
         open_stored_browser(state, app);
     }
     if !outcome.ok && outcome.kind == "error" {
@@ -273,6 +277,9 @@ pub(crate) fn open_stored_browser(state: &AppState, app: &AppHandle) {
 pub async fn open_harness_impl(state: &AppState, app: &AppHandle) -> Result<(), String> {
     let snap = state.proc.snapshot();
     if snap.state == crate::process::ProcessState::Running {
+        // Already up: the token may have been parsed after the last status
+        // push, in which case the snapshot's URL is still the bare one.
+        let _ = state.proc.wait_for_token_url().await;
         open_stored_browser(state, app);
         return Ok(());
     }
@@ -435,7 +442,8 @@ pub fn update_config(
             cfg.node_path = None; // clear → back to auto-detection
         } else {
             // Accept `~/…` expanded against home, then prove the binary
-            // works (executes + major >= MIN_NODE_MAJOR) before trusting it.
+            // works (executes + able to run DSH; see `node_compatible`)
+            // before trusting it.
             let expanded = if p.starts_with("~/") {
                 dirs::home_dir()
                     .map(|h| h.join(p.trim_start_matches("~/")))
@@ -460,10 +468,10 @@ pub fn update_config(
                 }
                 None => {
                     return Err(format!(
-                        "{} does not provide a usable Node.js (needs v{}+). \
+                        "{} does not provide a usable Node.js (DeepSeek Harness needs {}). \
                          Auto-detection will be used.",
                         expanded.display(),
-                        crate::runtime::detector::MIN_NODE_MAJOR
+                        crate::runtime::detector::MIN_NODE_LABEL
                     ));
                 }
             }
@@ -803,7 +811,7 @@ fn plugin_npx_args(input: &str) -> Result<Vec<String>, String> {
                     .into(),
             );
         }
-        let tokens: Vec<String> = input.split_whitespace().map(str::to_string).collect();
+        let mut tokens: Vec<String> = input.split_whitespace().map(str::to_string).collect();
         if tokens.len() < 2 {
             return Err("The npx command is missing arguments.".into());
         }
@@ -812,6 +820,17 @@ fn plugin_npx_args(input: &str) -> Result<Vec<String>, String> {
                 "The command must target the @deepseek-ai/dsh package, e.g. `npx -y --package @deepseek-ai/dsh dsh plugin --profile web add …`."
                     .into(),
             );
+        }
+        // `dsh plugin` requires `--profile <name>`. Commands written before
+        // that was known — including the one-click links an earlier build
+        // offered — omit it and die with "required option '--profile <name>'
+        // not specified", so supply the profile this launcher boots instead of
+        // failing. An explicit `--profile` (any value) is always left alone.
+        if let Some(i) = tokens.iter().position(|t| t == "plugin") {
+            if !tokens[i..].iter().any(|t| t == "--profile") {
+                tokens.insert(i + 1, "--profile".to_string());
+                tokens.insert(i + 2, "web".to_string());
+            }
         }
         return Ok(tokens[1..].to_vec());
     }
@@ -871,6 +890,28 @@ pub async fn install_dsh_plugin(
         npx_args.join(" ")
     ));
 
+    // `dsh plugin` shells out to pnpm, so make sure one exists *before*
+    // running the command — otherwise it exits 127 with "pnpm not found on
+    // PATH", which a retry can never fix.
+    let npm_cli = {
+        let sibling = npx_cli.with_file_name("npm-cli.js");
+        if sibling.exists() {
+            sibling
+        } else {
+            crate::runtime::detector::npm_cli_for(&node.path).unwrap_or(sibling)
+        }
+    };
+    let pnpm_dir = match ensure_pnpm(&node, &npm_cli, &app).await {
+        Ok(dir) => dir,
+        Err(e) => {
+            config::install_log_line(&format!("pnpm setup FAILED: {e}"));
+            return Err(e);
+        }
+    };
+    if let Some(dir) = pnpm_dir.as_ref() {
+        log(&format!("plugin command: pnpm from {}", dir.display()));
+    }
+
     const MAX_ATTEMPTS: u32 = 2;
     let mut last_exit: Option<i32> = None;
 
@@ -889,7 +930,7 @@ pub async fn install_dsh_plugin(
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
 
-        match run_plugin_once(&node, &npx_cli, &npx_args, &app, &input).await {
+        match run_plugin_once(&node, &npx_cli, &npx_args, &app, &input, pnpm_dir.as_deref()).await {
             PluginRun::Success => return Ok(input),
             PluginRun::FailedExit(code) => {
                 last_exit = code;
@@ -906,6 +947,116 @@ pub async fn install_dsh_plugin(
         "The plugin install failed after {MAX_ATTEMPTS} attempts (exit code {:?}) — see the log above.",
         last_exit
     ))
+}
+
+/// pnpm major the launcher installs for itself when the machine has none.
+///
+/// `dsh plugin` is a *thin pnpm forwarder*: it resolves a profile directory and
+/// runs `spawnSync("pnpm", …)` with the inherited PATH, so plugin management
+/// needs a real pnpm from somewhere. Node ≤ 24 shipped corepack (whose shim
+/// provides one), but Node 25 dropped corepack — with a bundled runtime there
+/// is simply no pnpm, and `dsh plugin` exits 127 with
+/// "pnpm not found on PATH".
+const PNPM_VERSION: &str = "11";
+
+/// The launcher's own pnpm, when it has already been installed.
+///
+/// `npm install -g --prefix X` puts the shim in `X/bin` on unix; on Windows
+/// the global bin directory *is* the prefix (`X\pnpm.cmd` beside
+/// `X\node_modules`), so both layouts are checked.
+fn provisioned_pnpm_dir() -> Option<std::path::PathBuf> {
+    let exe = if cfg!(windows) { "pnpm.cmd" } else { "pnpm" };
+    let tools = config::tools_dir();
+    [tools.join("bin"), tools]
+        .into_iter()
+        .find(|dir| dir.join(exe).exists())
+}
+
+/// Is a *working* `pnpm` already reachable through PATH?
+///
+/// Corepack shims answer this question honestly: an uncached (or cleaned)
+/// version makes the shim exit non-zero, and such a shim must not be trusted —
+/// the launcher installs its own copy instead.
+fn pnpm_on_path() -> bool {
+    let mut cmd = if cfg!(windows) {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "pnpm --version"]);
+        c
+    } else {
+        let mut c = std::process::Command::new("pnpm");
+        c.arg("--version");
+        c
+    };
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Make sure the plugin command can find a pnpm.
+///
+/// Returns the directory to prepend to `PATH`, or `None` when an existing
+/// pnpm on PATH can be used as-is.
+async fn ensure_pnpm(
+    node: &crate::runtime::NodeInfo,
+    npm_cli: &std::path::Path,
+    app: &AppHandle,
+) -> Result<Option<std::path::PathBuf>, String> {
+    if let Some(dir) = provisioned_pnpm_dir() {
+        return Ok(Some(dir));
+    }
+    if pnpm_on_path() {
+        log("pnpm: using the copy already on PATH");
+        return Ok(None);
+    }
+
+    let tools = config::tools_dir();
+    std::fs::create_dir_all(&tools)
+        .map_err(|e| format!("Cannot create {}: {e}", tools.display()))?;
+    let args: Vec<String> = vec![
+        "install".into(),
+        "-g".into(),
+        format!("pnpm@{PNPM_VERSION}"),
+        "--prefix".into(),
+        tools.display().to_string(),
+        "--no-audit".into(),
+        "--no-fund".into(),
+        "--loglevel".into(),
+        "error".into(),
+    ];
+    log(&format!(
+        "pnpm not found — installing pnpm@{PNPM_VERSION} into {}",
+        tools.display()
+    ));
+    config::install_log_line(&format!(
+        "$ node {} {}",
+        npm_cli.display(),
+        args.join(" ")
+    ));
+    let _ = app.emit(
+        "dsh://plugin",
+        format!(
+            "[launcher] `dsh plugin` forwards to pnpm and none was found on this machine — \
+             installing pnpm@{PNPM_VERSION} into the launcher's own directory (one time only)…"
+        ),
+    );
+
+    match run_plugin_once(node, npm_cli, &args, app, "setup: pnpm", None).await {
+        PluginRun::Success => provisioned_pnpm_dir().map(Some).ok_or_else(|| {
+            format!(
+                "pnpm was installed but no pnpm executable appeared in {}.",
+                tools.display()
+            )
+        }),
+        PluginRun::FailedExit(code) => Err(format!(
+            "Could not install pnpm (exit code {:?}) — plugin management needs pnpm. \
+             Install it yourself (`npm install -g pnpm`) and try again.",
+            code
+        )),
+        PluginRun::Fatal(e) => Err(e),
+    }
 }
 
 /// Outcome of one plugin command run.
@@ -925,6 +1076,7 @@ async fn run_plugin_once(
     npx_args: &[String],
     app: &AppHandle,
     input: &str,
+    pnpm_dir: Option<&std::path::Path>,
 ) -> PluginRun {
     let mut cmd = tokio::process::Command::new(&node.path);
     cmd.arg(npx_cli).args(npx_args);
@@ -935,7 +1087,13 @@ async fn run_plugin_once(
         .unwrap_or_default();
     let sep = if cfg!(windows) { ";" } else { ":" };
     let old_path = std::env::var("PATH").unwrap_or_default();
-    cmd.env("PATH", format!("{}{}{old_path}", node_dir.display(), sep));
+    // The launcher's own pnpm comes first (when it has one), then the node
+    // directory: `dsh plugin` runs a bare `pnpm`, so it must be on PATH.
+    let prefix = match pnpm_dir {
+        Some(dir) => format!("{}{sep}{}{sep}", dir.display(), node_dir.display()),
+        None => format!("{}{sep}", node_dir.display()),
+    };
+    cmd.env("PATH", format!("{prefix}{old_path}"));
     cmd.stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -1100,6 +1258,52 @@ mod tests {
             .map(str::to_string)
             .collect();
         assert_eq!(args, expected);
+    }
+
+    #[test]
+    fn missing_profile_is_filled_in_for_plugin_commands() {
+        // The one-click links an earlier build offered used this shape, and
+        // `dsh plugin` rejects it: "required option '--profile <name>' not
+        // specified". The launcher boots the `web` profile, so supply it.
+        let args = args_ok("npx @deepseek-ai/dsh plugin add https://github.com/ConvFusion/DSH-additive");
+        assert_eq!(
+            args,
+            vec![
+                "@deepseek-ai/dsh",
+                "plugin",
+                "--profile",
+                "web",
+                "add",
+                "https://github.com/ConvFusion/DSH-additive",
+            ]
+        );
+
+        // The explicit `--package … dsh` spelling is handled too.
+        let args = args_ok("npx -y --package @deepseek-ai/dsh dsh plugin add some-plugin");
+        assert_eq!(
+            args,
+            vec![
+                "-y",
+                "--package",
+                "@deepseek-ai/dsh",
+                "dsh",
+                "plugin",
+                "--profile",
+                "web",
+                "add",
+                "some-plugin",
+            ]
+        );
+
+        // An explicit profile is never overridden, and non-plugin commands
+        // are left untouched.
+        let args = args_ok("npx @deepseek-ai/dsh plugin --profile tui add some-plugin");
+        assert_eq!(
+            args,
+            vec!["@deepseek-ai/dsh", "plugin", "--profile", "tui", "add", "some-plugin"]
+        );
+        let args = args_ok("npx @deepseek-ai/dsh web --port 3080");
+        assert_eq!(args, vec!["@deepseek-ai/dsh", "web", "--port", "3080"]);
     }
 
     #[test]

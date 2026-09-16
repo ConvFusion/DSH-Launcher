@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type {
+  ConsoleKind,
   EnvProgress,
   LauncherStatus,
   MainPhase,
@@ -29,11 +30,13 @@ export default function App() {
   /**
    * Live console log of the running DSH install/update command
    * (`dsh://update`), shown on the home page while the button reads
-   * "Updating…" — and kept on screen if it failed, so the reason stays
-   * readable after the toast disappears.
+   * "Installing…"/"Updating…" — and kept on screen if it failed, so the
+   * reason stays readable after the toast disappears.
    */
   const [updateLines, setUpdateLines] = useState<string[]>([]);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  /** Which command produced the log above (install vs update), for its title. */
+  const [consoleKind, setConsoleKind] = useState<ConsoleKind | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const notify = useCallback((msg: string) => {
@@ -136,6 +139,8 @@ export default function App() {
         updateInfo={updateInfo}
         updateLines={updateLines}
         updateError={updateError}
+        consoleKind={consoleKind}
+        setConsoleKind={setConsoleKind}
         setUpdateLines={setUpdateLines}
         setUpdateError={setUpdateError}
         checkUpdate={checkUpdate}
@@ -159,6 +164,8 @@ function AppShell({
   updateInfo,
   updateLines,
   updateError,
+  consoleKind,
+  setConsoleKind,
   setUpdateLines,
   setUpdateError,
   checkUpdate,
@@ -177,6 +184,8 @@ function AppShell({
   updateInfo: UpdateInfo | null;
   updateLines: string[];
   updateError: string | null;
+  consoleKind: ConsoleKind | null;
+  setConsoleKind: (kind: ConsoleKind | null) => void;
   setUpdateLines: (lines: string[]) => void;
   setUpdateError: (err: string | null) => void;
   checkUpdate: () => void;
@@ -218,9 +227,21 @@ function AppShell({
         setBusyPhase("opening");
         await api.openHarness();
       } else {
+        // First install: show the live console log too (the backend streams
+        // every npm line into `dsh://update`, same as an update), so a cold
+        // install is never a silent spinner.
         setBusyPhase("installing");
-        const report = await api.ensureEnvironment();
-        if (report.error) throw new Error(report.error);
+        setConsoleKind("install");
+        setUpdateLines([]);
+        setUpdateError(null);
+        try {
+          const report = await api.ensureEnvironment();
+          if (report.error) throw new Error(report.error);
+        } catch (e) {
+          // Keep the streamed log on screen: it is what explains the failure.
+          setUpdateError(String(e));
+          throw e;
+        }
         await refresh();
         setBusyPhase("opening");
         await api.openHarness();
@@ -278,6 +299,7 @@ function AppShell({
     const wasRunning = currentStatus.process.state === "running";
     setBusyPhase("updating");
     // Fresh log for this attempt; the backend streams every npm line into it.
+    setConsoleKind("update");
     setUpdateLines([]);
     setUpdateError(null);
     try {
@@ -345,6 +367,7 @@ function AppShell({
             updateInfo={updateInfo}
             updateLines={updateLines}
             updateError={updateError}
+            consoleKind={consoleKind}
             onDismissUpdateLog={() => {
               setUpdateLines([]);
               setUpdateError(null);

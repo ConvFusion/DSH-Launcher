@@ -202,10 +202,10 @@ impl AppState {
                     "node",
                     match &too_old {
                         Some(n) => format!(
-                            "Step 1/2: System Node.js v{} at {} is too old (need v{}) — downloading a bundled runtime…",
+                            "Step 1/2: System Node.js v{} at {} cannot run DeepSeek Harness (need {}) — downloading a bundled runtime…",
                             n.version,
                             n.path.display(),
-                            runtime::detector::MIN_NODE_MAJOR
+                            runtime::detector::MIN_NODE_LABEL
                         ),
                         None => "Step 1/2: No compatible Node.js found — downloading a bundled runtime…".into(),
                     },
@@ -261,12 +261,22 @@ impl AppState {
                         );
                     }
                 });
+                // Stream the command and every npm output line to the UI
+                // (`dsh://update`), exactly like the update path
+                // (`install_dsh_package`): a first install can take minutes of
+                // otherwise silent waiting, and the home page shows that live
+                // log while the button reads "Installing…".
+                let on_line: runtime::installer::LineSink = {
+                    let app2 = app.clone();
+                    std::sync::Arc::new(move |line: String| {
+                        let _ = app2.emit("dsh://update", line);
+                    })
+                };
                 let _version = {
                     let target = self.dsh_target_dir();
-                    // First-run install keeps the "tail into Show Details"
-                    // behaviour; the live console log is wired for the update
-                    // path (see `install_dsh_package`).
-                    runtime::installer::install_dsh(&node.path, &target, None, Some(on_tail))
+                    // Keep feeding the "Show Details" tail as well: it is the
+                    // hint attached to the failure banner.
+                    runtime::installer::install_dsh(&node.path, &target, Some(on_line), Some(on_tail))
                         .await
                         .map_err(|e| (e, Some("Check the Details for the npm output.".into())))?
                 };
@@ -407,6 +417,9 @@ pub async fn startup(app: AppHandle) {
         //    (remembered one, or the OS default). Never on autostart —
         //    the user can open it from the home button instead.
         if !autostart && cfg.open_browser_on_start {
+            // Same race as in `start_dsh_inner`: wait for the `?token=…` banner
+            // before opening, so the browser gets an authorized URL.
+            let _ = state.proc.wait_for_token_url().await;
             crate::commands::open_stored_browser(&state, &app);
         }
     }

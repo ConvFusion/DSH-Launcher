@@ -21,6 +21,8 @@ scripts/sign-macos-debug.sh
 
 # Logs
 logs
+# 用户反馈时提供的日志包（install.log / launcher.log …），不入库
+user_logs/
 *.log
 npm-debug.log*
 yarn-debug.log*

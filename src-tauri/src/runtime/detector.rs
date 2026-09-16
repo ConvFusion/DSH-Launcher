@@ -18,8 +18,9 @@
 //!
 //! **All** candidates from **all** sources are collected and the highest
 //! version wins. This matters because a stale v18 left in `/usr/local/bin`
-//! must never shadow a newer v22/v24 installed via nvm or Homebrew. Anything
-//! older than Node 20 is considered incompatible.
+//! must never shadow a newer v22/v24 installed via nvm or Homebrew. A runtime
+//! is only used when it can actually run DSH — see [`node_compatible`] for the
+//! requirement (which is stricter than "any recent Node").
 
 use super::{DshInfo, NodeInfo, NodeSource};
 use crate::config::{dsh_dir, log, runtime_dir};
@@ -30,11 +31,44 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-/// Minimum Node major version supported by DeepSeek Harness.
-pub const MIN_NODE_MAJOR: u32 = 20;
+/// The Node.js requirement, phrased for user-facing messages. The actual rule
+/// lives in [`node_compatible`].
+pub const MIN_NODE_LABEL: &str = "Node.js v22.19+ (or v24.2+)";
 
 /// The npm package that provides the `dsh` CLI.
 pub const DSH_PACKAGE: &str = "@deepseek-ai/dsh";
+
+/// Can this Node.js version actually run DeepSeek Harness?
+///
+/// `@deepseek-ai/dsh` declares **no** `engines` field (neither do its
+/// sub-packages), so the requirement cannot be read from its manifest and is
+/// maintained here instead. It is the stricter of two independently verified
+/// bounds for the DSH version the launcher installs
+/// (`@deepseek-ai/dsh@0.1.5-rc.1`):
+///
+/// * **Declared:** its dependency tree requires Node >= 22.12 (`commander`)
+///   and >= 22.19 (`undici`, `@earendil-works/pi-ai`). npm merely *warns*
+///   about this (`EBADENGINE`), so a too-old runtime installs happily and
+///   only misbehaves later.
+/// * **Actual:** its CLI entry ends with `if (import.meta.main) await
+///   runCli();`, and `import.meta.main` exists only from Node 22.18 (22.x
+///   line) and 24.2 (24.x line). On anything older the CLI runs **nothing**,
+///   prints nothing and exits 0 — the service "started" and vanished with no
+///   diagnostic at all. Node 23 (EOL) never received the feature.
+///
+/// So this is deliberately *not* a `major >= N` test. Re-verify both bounds
+/// whenever the DSH version the launcher installs changes.
+pub fn node_compatible(version: &str) -> bool {
+    // Tolerate nodejs.org's `v22.19.0` shape as well as the bare `22.19.0`
+    // that `node --version` is normalized to.
+    let (major, minor, _patch) = version_key(version.trim().trim_start_matches('v'));
+    match major {
+        22 => minor >= 19,
+        23 => false,
+        24 => minor >= 2,
+        m => m >= 25,
+    }
+}
 
 /// Collect every Node.js candidate across all sources, deduplicated by
 /// canonical path. First sight (bundled → PATH → known locations) decides
@@ -122,21 +156,19 @@ fn version_key(version: &str) -> (u32, u32, u32) {
     )
 }
 
-/// Newest compatible (major >= MIN_NODE_MAJOR) Node anywhere on the system.
+/// Newest compatible (see [`node_compatible`]) Node anywhere on the system.
 /// Logs a diagnostic when nothing compatible is found.
 pub fn detect_node() -> Option<NodeInfo> {
     let candidates = all_node_candidates();
     let best = best_by_version(candidates);
-    let found = best
-        .clone()
-        .filter(|n| node_major(&n.version).map(|m| m >= MIN_NODE_MAJOR).unwrap_or(false));
+    let found = best.clone().filter(|n| node_compatible(&n.version));
     if found.is_none() {
         match &best {
             Some(n) => log(&format!(
-                "node detection failed: newest available is v{} at {} (need >= v{})",
+                "node detection failed: newest available is v{} at {} (need {})",
                 n.version,
                 n.path.display(),
-                MIN_NODE_MAJOR
+                MIN_NODE_LABEL
             )),
             None => log(&format!(
                 "node detection failed: no Node.js found on the launcher PATH, \
@@ -164,15 +196,13 @@ pub fn detect_node_any() -> Option<NodeInfo> {
 /// auto-detection.
 pub fn detect_node_override(path: &Path) -> Option<NodeInfo> {
     let version = node_version(path)?;
-    let supported = node_major(&version)
-        .map(|m| m >= MIN_NODE_MAJOR)
-        .unwrap_or(false);
+    let supported = node_compatible(&version);
     if !supported {
         log(&format!(
-            "configured node_path {} reports v{} (need >= v{}) — ignoring, falling back to auto-detection",
+            "configured node_path {} reports v{} (need {}) — ignoring, falling back to auto-detection",
             path.display(),
             version,
-            MIN_NODE_MAJOR
+            MIN_NODE_LABEL
         ));
         return None;
     }
@@ -195,10 +225,6 @@ fn node_version(path: &Path) -> Option<String> {
     } else {
         None
     }
-}
-
-pub fn node_major(version: &str) -> Option<u32> {
-    version.split('.').next()?.parse().ok()
 }
 
 fn check_candidate(path: &Path, source: NodeSource) -> Option<NodeInfo> {
@@ -992,7 +1018,9 @@ pub fn env_diagnostics() -> Vec<String> {
             }
         }
         None => {
-            out.push("selected node: NONE (no compatible Node.js >= v{MIN_NODE_MAJOR})".into());
+            out.push(format!(
+                "selected node: NONE (DeepSeek Harness needs {MIN_NODE_LABEL})"
+            ));
             if let Some(any) = detect_node_any() {
                 out.push(format!(
                     "newest node (any version): v{} at {}",
@@ -1028,6 +1056,40 @@ mod tests {
     }
 
     #[test]
+    fn node_compatible_follows_the_dsh_requirement() {
+        // Runnable: 22.19+ on the 22 line, 24.2+ on the 24 line, newer lines.
+        for v in ["22.19.0", "22.21.1", "24.2.0", "24.9.0", "25.0.0", "26.1.0"] {
+            assert!(node_compatible(v), "v{v} must be accepted");
+        }
+        // Rejected: everything before the 22.19 dependency floor, the user-
+        // reported v21.7.3, Node 23 (EOL, never received `import.meta.main`),
+        // and the 24.0/24.1 releases from before that feature landed.
+        // v22.18.0 has `import.meta.main` but the dependency tree still
+        // requires >= 22.19, so the floor stays at 22.19.
+        for v in [
+            "18.20.4",
+            "20.17.0",
+            "21.7.3",
+            "22.0.0",
+            "22.11.0",
+            "22.14.0",
+            "22.18.0",
+            "23.0.0",
+            "23.11.0",
+            "24.0.0",
+            "24.1.0",
+        ] {
+            assert!(!node_compatible(v), "v{v} must be rejected");
+        }
+        // nodejs.org's index reports versions as `v22.19.0`.
+        assert!(node_compatible("v22.19.0"));
+        assert!(!node_compatible("v21.7.3"));
+        // Garbage must not be treated as compatible.
+        assert!(!node_compatible(""));
+        assert!(!node_compatible("unknown"));
+    }
+
+    #[test]
     fn best_by_version_prefers_highest_across_sources() {
         let mut candidates = vec![
             cand("18.19.0", NodeSource::System), // stale node first on PATH
@@ -1051,7 +1113,7 @@ mod tests {
         let node = detect_node();
         if let Some(n) = &node {
             assert!(
-                node_major(&n.version).unwrap() >= MIN_NODE_MAJOR,
+                node_compatible(&n.version),
                 "detect_node must only return compatible versions, got {}",
                 n.version
             );
@@ -1255,14 +1317,23 @@ mod tests {
         };
 
         let good = base.join("good-node");
-        write_exec(&good, "#!/bin/sh\necho 22.11.0\n");
+        write_exec(&good, "#!/bin/sh\necho 22.19.0\n");
+        // Reports a version (so it "works") that DSH cannot actually run on:
+        // still rejected, because the override must be *supported*, not merely
+        // executable.
+        let too_old = base.join("old-node");
+        write_exec(&too_old, "#!/bin/sh\necho 21.7.3\n");
         let broken = base.join("broken-node");
         write_exec(&broken, "#!/bin/sh\nexit 1\n");
 
         let ok = detect_node_override(&good);
         assert!(
-            ok.as_ref().map(|n| n.version == "22.11.0").unwrap_or(false),
+            ok.as_ref().map(|n| n.version == "22.19.0").unwrap_or(false),
             "a working, supported configured node must be accepted: {ok:?}"
+        );
+        assert!(
+            detect_node_override(&too_old).is_none(),
+            "a node that cannot run DSH must be rejected"
         );
         assert!(detect_node_override(&broken).is_none(), "a broken node must be rejected");
         assert!(
@@ -1308,7 +1379,7 @@ mod tests {
             Some(n) => {
                 // A compatible node was found — it must not be the old shim.
                 assert!(
-                    node_major(&n.version).unwrap() >= MIN_NODE_MAJOR,
+                    node_compatible(&n.version),
                     "an incompatible node must not be returned (got v{})",
                     n.version
                 );
@@ -1317,7 +1388,7 @@ mod tests {
                 // No other node on this machine: node_any must at least see
                 // the old shim so the UI can say "too old".
                 let n = any.as_ref().expect("the old node must be visible to detect_node_any");
-                assert!(node_major(&n.version).unwrap() < MIN_NODE_MAJOR);
+                assert!(!node_compatible(&n.version));
             }
         }
     }
@@ -1371,7 +1442,7 @@ mod tests {
 
         if let Some(n) = &node {
             assert!(
-                node_major(&n.version).unwrap() >= MIN_NODE_MAJOR,
+                node_compatible(&n.version),
                 "detected node must be compatible (got v{})",
                 n.version
             );
