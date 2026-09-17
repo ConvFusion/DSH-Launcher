@@ -155,6 +155,80 @@ pub async fn check_dsh_update(state: State<'_, AppState>) -> Result<UpdateInfo, 
     }
 }
 
+/// Check for a newer version of the **launcher itself** by querying GitHub
+/// Releases. Returns the installed version, the latest release version, and
+/// whether an update is available (semver-aware comparison).
+#[tauri::command]
+pub async fn check_launcher_update() -> Result<UpdateInfo, String> {
+    let installed = env!("CARGO_PKG_VERSION").to_string();
+    let url = "https://api.github.com/repos/ConvFusion/DSH-Launcher/releases/latest";
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .user_agent("dsh-launcher/update-check")
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+
+    let resp = client
+        .get(url)
+        .send()
+        .await
+        .map_err(|e| format!("update check request failed: {e}"))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!(
+            "update check returned {} : {}",
+            status,
+            body
+        ));
+    }
+
+    let json: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("failed to parse update check response: {e}"))?;
+
+    let tag = json["tag_name"]
+        .as_str()
+        .ok_or("release tag_name not found")?;
+
+    // Strip the leading "v" if present.
+    let latest = tag.strip_prefix('v').unwrap_or(tag).to_string();
+
+    // Semver-aware comparison.
+    let update_available = match (
+        semver::Version::parse(&installed).ok(),
+        semver::Version::parse(&latest).ok(),
+    ) {
+        (Some(inst), Some(lat)) => inst < lat,
+        _ => installed != latest,
+    };
+
+    Ok(UpdateInfo {
+        installed: Some(installed),
+        latest: Some(latest),
+        update_available,
+    })
+}
+
+/// Open the launcher's GitHub Releases page in the user's default browser.
+///
+/// The home page's "update available" banner routes through here on purpose:
+/// a plain `<a target="_blank">` is a **no-op** inside the Tauri webview (no
+/// `on_new_window` handler is registered, so the webview refuses to create the
+/// window and the click is silently dropped), and a plain `<a href>` would
+/// navigate the launcher webview itself away from the app.
+///
+/// The URL is fixed here rather than passed in from the frontend, so the IPC
+/// surface cannot be used to open arbitrary URLs.
+#[tauri::command]
+pub fn open_releases_page() -> Result<(), String> {
+    const RELEASES_URL: &str = "https://github.com/ConvFusion/DSH-Launcher/releases";
+    browser::open_url_default(RELEASES_URL)
+}
+
 // ---------------------------------------------------------------------------
 // Process control
 // ---------------------------------------------------------------------------

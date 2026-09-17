@@ -68,6 +68,8 @@ pub fn run(launched_by_autostart: bool) {
             commands::remove_dsh_plugin,
             commands::plugin_status,
             commands::check_dsh_update,
+            commands::check_launcher_update,
+            commands::open_releases_page,
             commands::start_dsh,
             commands::stop_dsh,
             commands::restart_dsh,

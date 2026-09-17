@@ -339,6 +339,20 @@ body {
   text-align: left;
 }
 
+/* Launcher update banner — shown when a newer release is available.
+   Subtle but noticeable: a small link that stands out just enough. */
+.home .launcher-update-banner {
+  display: block;
+  color: var(--accent);
+  font-size: 11.5px;
+  text-align: center;
+  margin-bottom: 6px;
+  text-decoration: none;
+}
+.home .launcher-update-banner:hover {
+  text-decoration: underline;
+}
+
 /* The launcher's own version, at the foot of the home column. Muted so it
    never competes with the primary action; selectable so it can be copy-pasted
    into a bug report. */

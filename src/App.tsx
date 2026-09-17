@@ -26,6 +26,7 @@ export default function App() {
   const [view, setView] = useState<View>("home");
   const [toast, setToast] = useState<string | null>(null);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [launcherUpdateInfo, setLauncherUpdateInfo] = useState<UpdateInfo | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   /**
    * Live console log of the running DSH install/update command
@@ -79,9 +80,17 @@ export default function App() {
       .catch(() => {});
   }, []);
 
+  const checkLauncherUpdate = useCallback(() => {
+    api
+      .checkLauncherUpdate()
+      .then(setLauncherUpdateInfo)
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     checkUpdate();
-  }, [checkUpdate]);
+    checkLauncherUpdate();
+  }, [checkUpdate, checkLauncherUpdate]);
 
   // "Refresh home" (top-right icon): behaves like reopening the app —
   // forces a full environment re-detection (Node.js / DSH / browsers) and
@@ -98,6 +107,11 @@ export default function App() {
       }
       try {
         setUpdateInfo(await api.checkDshUpdate());
+      } catch {
+        /* network unreachable — keep the previous value */
+      }
+      try {
+        setLauncherUpdateInfo(await api.checkLauncherUpdate());
       } catch {
         /* network unreachable — keep the previous value */
       }
@@ -137,6 +151,7 @@ export default function App() {
         setView={setView}
         toast={toast}
         updateInfo={updateInfo}
+        launcherUpdateInfo={launcherUpdateInfo}
         updateLines={updateLines}
         updateError={updateError}
         consoleKind={consoleKind}
@@ -162,6 +177,7 @@ function AppShell({
   setView,
   toast,
   updateInfo,
+  launcherUpdateInfo,
   updateLines,
   updateError,
   consoleKind,
@@ -182,6 +198,7 @@ function AppShell({
   setView: (v: View) => void;
   toast: string | null;
   updateInfo: UpdateInfo | null;
+  launcherUpdateInfo: UpdateInfo | null;
   updateLines: string[];
   updateError: string | null;
   consoleKind: ConsoleKind | null;
@@ -365,6 +382,7 @@ function AppShell({
             busyPhase={busyPhase}
             envProgress={envProgress}
             updateInfo={updateInfo}
+            launcherUpdateInfo={launcherUpdateInfo}
             updateLines={updateLines}
             updateError={updateError}
             consoleKind={consoleKind}
@@ -377,6 +395,7 @@ function AppShell({
             onStart={startService}
             onStop={stopService}
             onRestart={restartService}
+            notify={notify}
           />
         )}
       </div>

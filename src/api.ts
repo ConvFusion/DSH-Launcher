@@ -14,6 +14,9 @@ export const api = {
   refreshStatus: () => invoke<LauncherStatus>("refresh_status"),
   ensureEnvironment: () => invoke<EnvReport>("ensure_environment"),
   checkDshUpdate: () => invoke<UpdateInfo>("check_dsh_update"),
+  checkLauncherUpdate: () => invoke<UpdateInfo>("check_launcher_update"),
+  /** Open the launcher's GitHub Releases page (fixed URL, resolved backend-side). */
+  openReleasesPage: () => invoke<void>("open_releases_page"),
   installDsh: () => invoke<string>("install_dsh_package"),
   installPlugin: (name: string) => invoke<string>("install_dsh_plugin", { name }),
   removePlugin: (name: string) => invoke<string>("remove_dsh_plugin", { name }),

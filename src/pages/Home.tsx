@@ -7,6 +7,7 @@ import type {
   UpdateInfo,
 } from "../types";
 import Logo from "../components/Logo";
+import { api } from "../api";
 import { useI18n } from "../i18n";
 
 interface Props {
@@ -22,6 +23,8 @@ interface Props {
   envProgress: EnvProgress | null;
   /** npm registry info: latest version + whether an update is available. */
   updateInfo: UpdateInfo | null;
+  /** GitHub Releases info for the launcher itself. */
+  launcherUpdateInfo: UpdateInfo | null;
   /** Live console log of the install/update command (`dsh://update`). */
   updateLines: string[];
   /** Set when the last install/update attempt failed; keeps the log on screen. */
@@ -34,7 +37,13 @@ interface Props {
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
+  /** Surface a short message (e.g. "could not open the browser"). */
+  notify: (msg: string) => void;
 }
+
+/** Where the "update available" banner sends the user to download a new build.
+ *  Kept in sync with the URL the backend command opens. */
+const RELEASES_URL = "https://github.com/ConvFusion/DSH-Launcher/releases";
 
 /** "m:ss" elapsed-time label, so a quiet log still looks alive. */
 function formatElapsed(totalSeconds: number) {
@@ -52,6 +61,7 @@ export default function Home({
   busyPhase,
   envProgress,
   updateInfo,
+  launcherUpdateInfo,
   updateLines,
   updateError,
   consoleKind,
@@ -61,6 +71,7 @@ export default function Home({
   onStart,
   onStop,
   onRestart,
+  notify,
 }: Props) {
   const { t } = useI18n();
   const env = status.env;
@@ -286,6 +297,27 @@ export default function Home({
               : t("home.update_waiting")}
           </pre>
         </div>
+      )}
+
+      {/* Launcher update notification — shown when a newer release is
+          available on GitHub. Clicking opens the Releases page in the user's
+          default browser. The click is routed through the backend (rather than
+          a `target="_blank"` link, which is a no-op inside the Tauri webview);
+          `href` is kept so the link can still be right-clicked / copied. */}
+      {launcherUpdateInfo?.update_available && (
+        <a
+          href={RELEASES_URL}
+          className="launcher-update-banner"
+          onClick={(e) => {
+            e.preventDefault();
+            api.openReleasesPage().catch((err) => notify(String(err)));
+          }}
+        >
+          {t("home.launcher_update", {
+            current: status.launcher_version,
+            latest: launcherUpdateInfo.latest ?? "",
+          })}
+        </a>
       )}
 
       {/* The launcher's own version, at the foot of the home column — bug
