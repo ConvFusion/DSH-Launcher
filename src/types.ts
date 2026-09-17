@@ -102,6 +102,11 @@ export interface UpdateInfo {
   update_available: boolean;
 }
 
+export interface PluginStatus {
+  name: string;
+  installed: boolean;
+}
+
 export interface EnvReport {
   ready: boolean;
   message: string | null;

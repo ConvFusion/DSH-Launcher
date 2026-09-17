@@ -250,7 +250,12 @@ export default function Home({
 
       {/* Error / progress message */}
       {procState === "error" && status.process.error && !isBusy && (
-        <p className="progress error">{status.process.error}</p>
+        <>
+          <p className="progress error">{status.process.error}</p>
+          {status.process.error_details && (
+            <pre className="error-details">{status.process.error_details}</pre>
+          )}
+        </>
       )}
       {isBusy && !isUpdating && envProgress?.message && (
         <p className="progress">{envProgress.message}</p>

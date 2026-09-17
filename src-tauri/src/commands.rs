@@ -869,6 +869,26 @@ pub async fn install_dsh_plugin(
     }
     let npx_args = plugin_npx_args(&input)?;
 
+    // Idempotency guard for the launcher's own plugins: if the package is
+    // already in the web profile's dependencies, skip the install instead of
+    // pnpm-adding it a second time — a duplicate add can leave two loader
+    // entries with the same id (e.g. "additive") and brick harness boot with
+    // "duplicate loader entry id: …".
+    if let Some(pkg) = supported_plugin_name(&input) {
+        let deps = read_profile_deps();
+        if deps.iter().any(|d| d == &pkg) {
+            let msg = format!(
+                "[launcher] {pkg} is already installed in the web profile — skipping. \
+                 If DeepSeek Harness crashes at boot, remove the plugin and reinstall after \
+                 the plugin author publishes a compatible build."
+            );
+            log(&msg);
+            config::install_log_line(&msg);
+            let _ = app.emit("dsh://plugin", msg);
+            return Ok("already-installed".into());
+        }
+    }
+
     let node = state
         .node()
         .ok_or("No compatible Node.js runtime is available — install DeepSeek Harness first.")?;
@@ -1166,6 +1186,163 @@ async fn run_plugin_once(
 }
 
 // ---------------------------------------------------------------------------
+// Web profile helpers (plugin idempotency / removal)
+// ---------------------------------------------------------------------------
+
+/// The only two plugins the launcher's install UI manages (remove + idempotency
+/// are scoped to these to avoid touching unrelated packages in the profile).
+const SUPPORTED_PLUGIN_NAMES: [&str; 2] = ["dsh-additive", "dsh-convfusion"];
+
+/// Path to the `web` profile's package.json (DSH_HOME defaults to `~/.dsh`).
+fn web_profile_package_json() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".dsh/profiles/web/package.json"))
+}
+
+/// Parse a plugin `input` string and return the package name if it maps to one
+/// of the launcher's two supported plugins. Recognises npm names, github
+/// `owner/repo#ref` forms, full https:// URLs, and wrapped npx commands.
+fn supported_plugin_name(input: &str) -> Option<String> {
+    let s = input.to_ascii_lowercase();
+    if s.contains("convfusion/dsh-additive")
+        || s.contains("github:convfusion/dsh-additive")
+        || s.trim() == "dsh-additive"
+    {
+        return Some("dsh-additive".into());
+    }
+    if s.contains("convfusion/convfusion-dsh")
+        || s.contains("github:convfusion/convfusion-dsh")
+        || s.trim() == "dsh-convfusion"
+    {
+        return Some("dsh-convfusion".into());
+    }
+    None
+}
+
+/// Read dependency keys from the web profile's package.json (empty if the
+/// profile doesn't exist yet or can't be parsed).
+fn read_profile_deps() -> Vec<String> {
+    let Some(path) = web_profile_package_json() else {
+        return Vec::new();
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    v.get("dependencies")
+        .and_then(|d| d.as_object())
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// Installed status of the launcher's supported plugins.
+#[derive(Serialize)]
+pub struct PluginStatus {
+    pub name: String,
+    pub installed: bool,
+}
+
+#[tauri::command]
+pub fn plugin_status() -> Vec<PluginStatus> {
+    let deps = read_profile_deps();
+    SUPPORTED_PLUGIN_NAMES
+        .iter()
+        .map(|n| PluginStatus {
+            name: (*n).to_string(),
+            installed: deps.iter().any(|d| d == n),
+        })
+        .collect()
+}
+
+/// Build npx args for `dsh plugin --profile web remove <pkg>`.
+fn plugin_remove_npx_args(pkg: &str) -> Vec<String> {
+    vec![
+        "@deepseek-ai/dsh".into(),
+        "plugin".into(),
+        "--profile".into(),
+        "web".into(),
+        "remove".into(),
+        pkg.to_string(),
+    ]
+}
+
+/// Remove one of the launcher's supported plugins from the `web` profile.
+/// Streaming output goes to `dsh://plugin` (same channel as install) so the UI
+/// already knows how to display it. Rejected for any other package name — we
+/// don't touch user-installed plugins we don't recognise.
+#[tauri::command]
+pub async fn remove_dsh_plugin(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    name: String,
+) -> Result<String, String> {
+    let pkg = name.trim().to_string();
+    if !SUPPORTED_PLUGIN_NAMES.contains(&pkg.as_str()) {
+        return Err(format!(
+            "Removal is only supported for the launcher's own plugins ({}).",
+            SUPPORTED_PLUGIN_NAMES.join(", ")
+        ));
+    }
+
+    let deps = read_profile_deps();
+    if !deps.iter().any(|d| d == &pkg) {
+        log(&format!("plugin remove: {pkg} is not installed — nothing to do"));
+        return Ok("not-installed".into());
+    }
+
+    let node = state
+        .node()
+        .ok_or("No compatible Node.js runtime is available.")?;
+    let npx_cli = crate::runtime::detector::npx_cli_for(&node.path)
+        .ok_or_else(|| format!("Cannot locate npx for Node at {}.", node.path.display()))?;
+    let npm_cli = {
+        let sibling = npx_cli.with_file_name("npm-cli.js");
+        if sibling.exists() {
+            sibling
+        } else {
+            crate::runtime::detector::npm_cli_for(&node.path).unwrap_or(sibling)
+        }
+    };
+    let pnpm_dir = ensure_pnpm(&node, &npm_cli, &app).await?;
+    if let Some(dir) = pnpm_dir.as_ref() {
+        log(&format!("plugin remove: pnpm from {}", dir.display()));
+    }
+
+    let args = plugin_remove_npx_args(&pkg);
+    log(&format!(
+        "plugin remove command: {} {}",
+        npx_cli.display(),
+        args.join(" ")
+    ));
+    config::install_log_line(&format!(
+        "$ node {} {}",
+        npx_cli.display(),
+        args.join(" ")
+    ));
+
+    match run_plugin_once(
+        &node,
+        &npx_cli,
+        &args,
+        &app,
+        &format!("remove {pkg}"),
+        pnpm_dir.as_deref(),
+    )
+    .await
+    {
+        PluginRun::Success => {
+            log(&format!("plugin {pkg} removed"));
+            Ok("removed".into())
+        }
+        PluginRun::FailedExit(code) => Err(format!(
+            "Removing {pkg} failed (exit code {code:?}) — see the log above."
+        )),
+        PluginRun::Fatal(e) => Err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Port helper for the "Use another port" flow
 // ---------------------------------------------------------------------------
 
@@ -1317,5 +1494,53 @@ mod tests {
     fn npm_names_starting_with_npx_are_not_commands() {
         let args = args_ok("npx-tools");
         assert_eq!(args.last().unwrap(), "npx-tools");
+    }
+
+    #[test]
+    fn supported_plugin_names_are_recognised_in_every_input_form() {
+        // Full npx command (what the one-click cards fill in).
+        assert_eq!(
+            supported_plugin_name(
+                "npx @deepseek-ai/dsh plugin --profile web add https://github.com/ConvFusion/DSH-additive"
+            ),
+            Some("dsh-additive".into())
+        );
+        // Bare repo URL / github shorthand / npm name.
+        assert_eq!(
+            supported_plugin_name("https://github.com/ConvFusion/DSH-additive"),
+            Some("dsh-additive".into())
+        );
+        assert_eq!(
+            supported_plugin_name("github:ConvFusion/DSH-additive"),
+            Some("dsh-additive".into())
+        );
+        assert_eq!(supported_plugin_name("dsh-additive"), Some("dsh-additive".into()));
+        // The research plugin's package name differs from its repo name.
+        assert_eq!(
+            supported_plugin_name("https://github.com/ConvFusion/ConvFusion-dsh"),
+            Some("dsh-convfusion".into())
+        );
+        assert_eq!(
+            supported_plugin_name("dsh-convfusion"),
+            Some("dsh-convfusion".into())
+        );
+        // Anything else is left alone: no idempotency check, no removal.
+        assert_eq!(supported_plugin_name("@rose43/dsh-file"), None);
+        assert_eq!(supported_plugin_name("github:owner/other-plugin"), None);
+    }
+
+    #[test]
+    fn remove_args_target_the_web_profile() {
+        assert_eq!(
+            plugin_remove_npx_args("dsh-additive"),
+            vec![
+                "@deepseek-ai/dsh",
+                "plugin",
+                "--profile",
+                "web",
+                "remove",
+                "dsh-additive",
+            ]
+        );
     }
 }

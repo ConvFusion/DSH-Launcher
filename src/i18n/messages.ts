@@ -72,6 +72,15 @@ const en = {
   "plugins.rec_research": "Research Agent",
   "plugins.rec_research_desc": "ConvFusion embraces Harness",
   "plugins.rec_hint": "Click a plugin to fill its full install command into the input box.",
+  "plugins.installed": "Installed",
+  "plugins.remove": "Remove",
+  "plugins.not_installed": "This plugin is not installed.",
+  "plugins.already_title": "Already installed",
+  "plugins.already_sub":
+    "This plugin is already in the web profile — no need to install again. If DeepSeek Harness crashes at boot, remove the plugin and reinstall after its author publishes a compatible build.",
+  "plugins.removed_title": "Plugin removed",
+  "plugins.removed_sub": "Restart DeepSeek Harness to apply the removal.",
+  "plugins.removed": "Plugin removed — restart DeepSeek Harness to apply.",
 
   // Settings
   "settings.language": "Language",
@@ -176,6 +185,15 @@ const zh: Record<MessageKey, string> = {
   "plugins.rec_research": "科研智能体",
   "plugins.rec_research_desc": "ConvFusion拥抱Harness",
   "plugins.rec_hint": "点击插件即可将完整安装命令填入输入框。",
+  "plugins.installed": "已安装",
+  "plugins.remove": "移除",
+  "plugins.not_installed": "该插件未安装。",
+  "plugins.already_title": "已安装",
+  "plugins.already_sub":
+    "该插件已在 web profile 中，无需重复安装。若 DSH 启动时崩溃，请移除插件，待插件作者发布兼容版本后再重新安装。",
+  "plugins.removed_title": "插件已移除",
+  "plugins.removed_sub": "重启 DeepSeek Harness 后生效。",
+  "plugins.removed": "插件已移除——重启 DeepSeek Harness 后生效。",
 
   // Settings
   "settings.language": "语言",

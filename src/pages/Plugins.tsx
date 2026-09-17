@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { api } from "../api";
 import { useI18n } from "../i18n";
@@ -9,19 +9,27 @@ interface Props {
   onChanged: () => void;
 }
 
-type DoneState = null | "ok" | "err";
+type DoneState = null | "ok" | "err" | "already" | "removed" | "notinstalled";
 
-/** Our own plugins, offered under the install button as one-click links. */
-const RECOMMENDED_PLUGINS: { label: MessageKey; desc: MessageKey; repo: string }[] = [
+/** Our own plugins, offered under the install button as one-click links.
+ *  `pkg` is the npm package name (used by install idempotency + removal). */
+const RECOMMENDED_PLUGINS: {
+  label: MessageKey;
+  desc: MessageKey;
+  repo: string;
+  pkg: string;
+}[] = [
   {
     label: "plugins.rec_additive",
     desc: "plugins.rec_additive_desc",
     repo: "https://github.com/ConvFusion/DSH-additive",
+    pkg: "dsh-additive",
   },
   {
     label: "plugins.rec_research",
     desc: "plugins.rec_research_desc",
     repo: "https://github.com/ConvFusion/ConvFusion-dsh",
+    pkg: "dsh-convfusion",
   },
 ];
 
@@ -50,6 +58,8 @@ export default function Plugins({ notify, onChanged }: Props) {
   const [retryHint, setRetryHint] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
   const [done, setDone] = useState<DoneState>(null);
+  /** Installed status of the two supported plugins, keyed by package name. */
+  const [installed, setInstalled] = useState<Record<string, boolean>>({});
   const outRef = useRef<HTMLPreElement | null>(null);
 
   // Append output lines streamed by the backend (`dsh://plugin`); watch for
@@ -86,6 +96,20 @@ export default function Plugins({ notify, onChanged }: Props) {
     if (el) el.scrollTop = el.scrollHeight;
   }, [lines]);
 
+  // Fetch installed status for the two supported plugins.
+  const refreshInstalled = useCallback(async () => {
+    try {
+      const list = await api.pluginStatus();
+      setInstalled(Object.fromEntries(list.map((p) => [p.name, p.installed])));
+    } catch {
+      /* non-fatal — the profile may not exist yet */
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshInstalled();
+  }, [refreshInstalled]);
+
   // Preview of the command that will be executed: full `npx …` input is
   // run as-is, anything else is wrapped into the standard plugin command
   // (mirrors the backend's plugin_npx_args).
@@ -107,8 +131,13 @@ export default function Plugins({ notify, onChanged }: Props) {
     setBusy(true);
     resetResult();
     try {
-      await api.installPlugin(trimmed);
-      setDone("ok");
+      const res = await api.installPlugin(trimmed);
+      if (res === "already-installed") {
+        setDone("already");
+      } else {
+        setDone("ok");
+      }
+      await refreshInstalled();
       onChanged();
     } catch (e) {
       setDone("err");
@@ -124,6 +153,30 @@ export default function Plugins({ notify, onChanged }: Props) {
     if (busy) return;
     setName(installCommand(repo));
     if (done) setDone(null);
+  }
+
+  // Remove one of the launcher's own plugins from the web profile.
+  async function removePlugin(pkg: string) {
+    if (busy) return;
+    setBusy(true);
+    resetResult();
+    try {
+      const res = await api.removePlugin(pkg);
+      if (res === "removed") {
+        setDone("removed");
+        notify(t("plugins.removed"));
+      } else {
+        setDone("notinstalled");
+        notify(t("plugins.not_installed"));
+      }
+      await refreshInstalled();
+      onChanged();
+    } catch (e) {
+      setDone("err");
+      notify(String(e));
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function restartNow() {
@@ -186,7 +239,7 @@ export default function Plugins({ notify, onChanged }: Props) {
           <div className="recommended-title">{t("plugins.rec_title")}</div>
           <ul className="recommended-list">
             {RECOMMENDED_PLUGINS.map((p) => (
-              <li key={p.repo}>
+              <li key={p.repo} className="recommended-item">
                 <button
                   type="button"
                   className="recommended-card"
@@ -200,6 +253,19 @@ export default function Plugins({ notify, onChanged }: Props) {
                   </span>
                   <span className="recommended-repo">{p.repo}</span>
                 </button>
+                {/* Installed badge + remove button for our own plugins. */}
+                {installed[p.pkg] && (
+                  <div className="plugin-installed-row">
+                    <span className="installed-badge">✓ {t("plugins.installed")}</span>
+                    <button
+                      className="btn small remove"
+                      disabled={busy}
+                      onClick={() => removePlugin(p.pkg)}
+                    >
+                      {t("plugins.remove")}
+                    </button>
+                  </div>
+                )}
               </li>
             ))}
           </ul>
@@ -235,6 +301,28 @@ export default function Plugins({ notify, onChanged }: Props) {
             <div>
               <div className="banner-title">{t("plugins.restart_hint_title")}</div>
               <div className="banner-sub">{t("plugins.restart_hint_sub")}</div>
+            </div>
+            <button className="btn small" disabled={busy} onClick={restartNow}>
+              ↻ {t("plugins.restart_now")}
+            </button>
+          </div>
+        )}
+        {done === "already" && (
+          <div className="plugin-banner ok">
+            <div>
+              <div className="banner-title">{t("plugins.already_title")}</div>
+              <div className="banner-sub">{t("plugins.already_sub")}</div>
+            </div>
+            <button className="btn small" disabled={busy} onClick={restartNow}>
+              ↻ {t("plugins.restart_now")}
+            </button>
+          </div>
+        )}
+        {done === "removed" && (
+          <div className="plugin-banner ok">
+            <div>
+              <div className="banner-title">{t("plugins.removed_title")}</div>
+              <div className="banner-sub">{t("plugins.removed_sub")}</div>
             </div>
             <button className="btn small" disabled={busy} onClick={restartNow}>
               ↻ {t("plugins.restart_now")}

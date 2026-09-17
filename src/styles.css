@@ -259,6 +259,27 @@ body {
   color: #ff5c5c;
 }
 
+/* The real reason the harness crashed (last lines of its output), shown under
+   the short error line so the user doesn't have to dig into the log files. */
+.home .error-details {
+  width: 100%;
+  max-width: 460px;
+  max-height: 180px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  box-sizing: border-box;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+}
+
 /* Live console log of the DSH install/update command, shown while the main
    button reads "Updating…" (and kept after a failure, so the npm output that
    explains it stays readable). The <pre> reuses the Plugins log panel look. */
@@ -653,6 +674,37 @@ body {
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+/* Each recommended item wraps the one-click card + an installed/remove row. */
+.recommended-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* Installed badge + remove button shown beneath a one-click plugin card. */
+.plugin-installed-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 4px;
+}
+
+.installed-badge {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #1a8754;
+}
+
+.btn.small.remove {
+  color: #c0392b;
+  border-color: var(--border-soft);
+}
+.btn.small.remove:hover:not(:disabled) {
+  background: #fdf0ef;
+  border-color: #c0392b;
 }
 
 .recommended-card {

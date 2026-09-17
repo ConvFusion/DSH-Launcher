@@ -4,6 +4,7 @@ import type {
   Config,
   EnvReport,
   LauncherStatus,
+  PluginStatus,
   UpdateInfo,
 } from "./types";
 
@@ -15,6 +16,8 @@ export const api = {
   checkDshUpdate: () => invoke<UpdateInfo>("check_dsh_update"),
   installDsh: () => invoke<string>("install_dsh_package"),
   installPlugin: (name: string) => invoke<string>("install_dsh_plugin", { name }),
+  removePlugin: (name: string) => invoke<string>("remove_dsh_plugin", { name }),
+  pluginStatus: () => invoke<PluginStatus[]>("plugin_status"),
 
   startDsh: (openBrowser?: boolean) => invoke("start_dsh", { openBrowser }),
   stopDsh: () => invoke<void>("stop_dsh"),

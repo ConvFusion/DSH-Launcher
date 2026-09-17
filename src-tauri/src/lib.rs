@@ -65,6 +65,8 @@ pub fn run(launched_by_autostart: bool) {
             commands::install_node_runtime,
             commands::install_dsh_package,
             commands::install_dsh_plugin,
+            commands::remove_dsh_plugin,
+            commands::plugin_status,
             commands::check_dsh_update,
             commands::start_dsh,
             commands::stop_dsh,
