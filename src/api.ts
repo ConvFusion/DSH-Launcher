@@ -17,7 +17,13 @@ export const api = {
   checkLauncherUpdate: () => invoke<UpdateInfo>("check_launcher_update"),
   /** Open the launcher's GitHub Releases page (fixed URL, resolved backend-side). */
   openReleasesPage: () => invoke<void>("open_releases_page"),
-  installDsh: () => invoke<string>("install_dsh_package"),
+  /**
+   * Install or update the DSH package. `version` picks the release channel —
+   * the "latest" or the "recommended" button — and is omitted for a first
+   * install, which takes the newest build.
+   */
+  installDsh: (version?: string) =>
+    invoke<string>("install_dsh_package", { version: version ?? null }),
   installPlugin: (name: string) => invoke<string>("install_dsh_plugin", { name }),
   removePlugin: (name: string) => invoke<string>("remove_dsh_plugin", { name }),
   pluginStatus: () => invoke<PluginStatus[]>("plugin_status"),

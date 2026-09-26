@@ -475,6 +475,45 @@ body {
   background: var(--accent-soft);
 }
 
+/* The per-channel update buttons sit on one row — they are two answers to the
+   same question, so they read as a single choice. `flex-wrap` keeps them from
+   overflowing on a narrow window, where the version numbers make the labels
+   long. */
+.update-choices {
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+
+/* Release-channel badges on the update buttons ("最新" / "推荐"). `.btn` is an
+   inline-flex box with its own gap, so these must not add margin of their own. */
+.btn .badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.6;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+}
+
+/* Newest build on any channel — the attention-seeker of the two. */
+.btn .badge-newest {
+  color: #fff;
+  background: var(--accent);
+}
+
+/* Maintainers' recommended build — quieter, it is the safe choice. */
+.btn .badge-recommended {
+  color: var(--accent);
+  background: var(--accent-soft);
+  border-color: var(--accent-border);
+}
+
 /* Control buttons row (Start / Restart / Stop) */
 .controls {
   display: flex;

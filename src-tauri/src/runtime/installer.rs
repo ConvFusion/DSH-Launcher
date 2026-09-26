@@ -456,6 +456,12 @@ fn ensure_install_manifest(manifest: &std::path::Path) -> Result<(), String> {
 /// `dir` (the folder that will contain `node_modules/@deepseek-ai/dsh`).
 /// Returns the installed version.
 ///
+/// `version` is the exact build to install. `None` resolves the newest build
+/// published on any npm channel, which is what a first install wants; the
+/// update buttons pass an explicit version so the version the UI advertised is
+/// the version that actually lands on disk (npm's `latest` tag is pinned to
+/// the maintainers' *recommended* build and can sit well behind the newest).
+///
 /// **Ordering guarantee:** DSH is installed with the npm that ships with the
 /// Node runtime passed in — callers must make sure Node.js is installed and
 /// detected *first*. We refuse to run without it.
@@ -467,6 +473,7 @@ fn ensure_install_manifest(manifest: &std::path::Path) -> Result<(), String> {
 pub async fn install_dsh(
     node: &std::path::Path,
     dir: &std::path::Path,
+    version: Option<&str>,
     on_line: Option<LineSink>,
     on_fail_tail: Option<Box<dyn Fn(String) + Send>>,
 ) -> Result<String, String> {
@@ -548,14 +555,32 @@ pub async fn install_dsh(
         DSH_SCRIPT_PACKAGES.join(", ")
     ));
 
-    log(&format!("running: {} install {DSH_PACKAGE}@latest", node.display()));
+    // Pin the exact version being installed. The home page advertises a
+    // specific version per channel, so letting npm re-resolve a tag here could
+    // install something other than what was promised — and the installed
+    // version would then never reach the advertised one, leaving "update
+    // available" on screen forever.
+    let spec = match version {
+        Some(v) => format!("{DSH_PACKAGE}@{v}"),
+        None => match latest_dsh_version().await {
+            Ok(v) => format!("{DSH_PACKAGE}@{v}"),
+            Err(e) => {
+                install_log_line(&format!(
+                    "could not resolve the newest DSH version ({e}) — falling back to the npm `latest` tag"
+                ));
+                format!("{DSH_PACKAGE}@latest")
+            }
+        },
+    };
+
+    log(&format!("running: {} install {spec}", node.display()));
 
     // Show the exact command as the first line of the live log, so the user
     // sees what is running (and can paste it into a terminal if it fails).
     emit_line(
         &on_line,
         format!(
-            "$ {} {} install --prefix {} --no-audit --no-fund --loglevel=warn {DSH_PACKAGE}@latest",
+            "$ {} {} install --prefix {} --no-audit --no-fund --loglevel=warn {spec}",
             node.display(),
             npm.display(),
             dir.display()
@@ -579,7 +604,7 @@ pub async fn install_dsh(
             .arg("--no-audit")
             .arg("--no-fund")
             .arg("--loglevel=warn")
-            .arg(format!("{DSH_PACKAGE}@latest"))
+            .arg(&spec)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -746,8 +771,61 @@ pub async fn install_dsh(
     Ok(installed.version)
 }
 
-/// Latest published version of DSH on the npm registry (abbreviated metadata).
-pub async fn latest_dsh_version() -> Result<String, String> {
+/// Highest semver among the values of an npm `dist-tags` map.
+///
+/// `dist-tags` maps a release **channel** to a version (`latest`, `next`,
+/// `alpha`, …). Values that are not parseable versions are ignored, because a
+/// tag is allowed to point at a non-version string.
+fn newest_dist_tag_version(tags: &serde_json::Map<String, serde_json::Value>) -> Option<String> {
+    let mut newest: Option<(semver::Version, String)> = None;
+    for value in tags.values() {
+        let Some(raw) = value.as_str() else { continue };
+        let Ok(parsed) = semver::Version::parse(raw) else {
+            continue;
+        };
+        // `map_or` rather than `is_none_or`: keeps the crate's 1.77.2 MSRV.
+        if newest.as_ref().map_or(true, |(best, _)| parsed > *best) {
+            newest = Some((parsed, raw.to_string()));
+        }
+    }
+    newest.map(|(_, raw)| raw)
+}
+
+/// The two DSH builds the launcher offers, as published on npm.
+///
+/// npm exposes release **channels** as dist-tags. The maintainers keep
+/// `latest` pinned to the build they recommend, while newer builds ship under
+/// the other tags (`next`, `alpha`) — so the two are routinely different, e.g.
+/// `latest` = `0.1.5-rc.3` while `next` = `0.1.7-rc.2`. The launcher shows both
+/// and lets the user choose, instead of pretending there is one answer.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DshChannels {
+    /// What `dist-tags.latest` points at — the maintainers' recommended build.
+    pub recommended: Option<String>,
+    /// Highest version across every dist-tag — the newest published build.
+    pub newest: Option<String>,
+}
+
+/// Turn an npm `dist-tags` map into the two channels the launcher offers.
+///
+/// `latest` is the maintainers' recommended channel; every other tag is
+/// considered when hunting for the newest build. A tag that points at a
+/// non-version string is ignored rather than trusted.
+fn channels_from_dist_tags(
+    tags: &serde_json::Map<String, serde_json::Value>,
+) -> DshChannels {
+    DshChannels {
+        recommended: tags
+            .get("latest")
+            .and_then(|x| x.as_str())
+            .filter(|s| semver::Version::parse(s).is_ok())
+            .map(|s| s.to_string()),
+        newest: newest_dist_tag_version(tags),
+    }
+}
+
+/// Read every release channel DSH publishes, in a single registry request.
+pub async fn dsh_channels() -> Result<DshChannels, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
@@ -762,11 +840,101 @@ pub async fn latest_dsh_version() -> Result<String, String> {
         return Err(format!("npm registry returned HTTP {}", resp.status()));
     }
     let v: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    // Abbreviated metadata has no top-level "version"; the latest tag lives
-    // under "dist-tags.latest".
-    v.get("dist-tags")
-        .and_then(|t| t.get("latest"))
-        .and_then(|x| x.as_str())
-        .map(|s| s.to_string())
-        .ok_or_else(|| "unexpected npm registry response".to_string())
+    // Abbreviated metadata has no top-level "version"; the channel pointers
+    // live under "dist-tags".
+    let tags = v
+        .get("dist-tags")
+        .and_then(|t| t.as_object())
+        .ok_or_else(|| "unexpected npm registry response (no dist-tags)".to_string())?;
+    Ok(channels_from_dist_tags(tags))
+}
+
+/// Newest published version of DSH on the npm registry (abbreviated metadata).
+///
+/// Deliberately **not** `dist-tags.latest`, which the maintainers pin to the
+/// recommended build: reading it alone made the launcher advertise a stale
+/// version forever (it offered `0.1.5-rc.3` while `0.1.7-rc.2` was already
+/// published under `next`). This is the version used when the caller does not
+/// name a channel, e.g. a first install.
+pub async fn latest_dsh_version() -> Result<String, String> {
+    dsh_channels()
+        .await?
+        .newest
+        .ok_or_else(|| "no parseable version among the npm dist-tags".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{channels_from_dist_tags, newest_dist_tag_version};
+
+    fn tags(pairs: &[(&str, &str)]) -> serde_json::Map<String, serde_json::Value> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
+            .collect()
+    }
+
+    #[test]
+    fn the_live_registry_maps_to_two_distinct_channels() {
+        // The registry state that motivated showing both buttons: `latest` is
+        // pinned to the maintainers' recommended build while `next` already
+        // carries a newer one, so neither can stand in for the other.
+        let t = tags(&[
+            ("latest", "0.1.5-rc.3"),
+            ("next", "0.1.7-rc.2"),
+            ("alpha", "0.1.7-alpha.2"),
+        ]);
+        let ch = channels_from_dist_tags(&t);
+        assert_eq!(ch.recommended.as_deref(), Some("0.1.5-rc.3"));
+        assert_eq!(ch.newest.as_deref(), Some("0.1.7-rc.2"));
+    }
+
+    #[test]
+    fn a_single_channel_reports_the_same_version_twice() {
+        // When nothing newer exists the UI must collapse the two buttons into
+        // one, which it does by comparing these two fields.
+        let ch = channels_from_dist_tags(&tags(&[("latest", "0.1.7")]));
+        assert_eq!(ch.recommended.as_deref(), Some("0.1.7"));
+        assert_eq!(ch.newest.as_deref(), Some("0.1.7"));
+    }
+
+    #[test]
+    fn a_recommended_tag_pointing_at_a_non_version_is_dropped() {
+        let ch = channels_from_dist_tags(&tags(&[("latest", "beta"), ("next", "0.1.6-alpha.2")]));
+        assert_eq!(ch.recommended, None);
+        assert_eq!(ch.newest.as_deref(), Some("0.1.6-alpha.2"));
+    }
+
+    #[test]
+    fn newest_dist_tag_beats_a_stale_latest_tag() {
+        // `latest` pinned at 0.1.5-rc.3 while `next` already pointed at
+        // 0.1.7-rc.2: reading only `latest` made the launcher advertise the
+        // stale version forever.
+        let t = tags(&[
+            ("latest", "0.1.5-rc.3"),
+            ("next", "0.1.7-rc.2"),
+            ("alpha", "0.1.7-alpha.2"),
+        ]);
+        assert_eq!(newest_dist_tag_version(&t).as_deref(), Some("0.1.7-rc.2"));
+    }
+
+    #[test]
+    fn a_final_release_outranks_its_own_release_candidate() {
+        // semver orders 0.1.7 above 0.1.7-rc.2; channel order must not override.
+        let t = tags(&[("latest", "0.1.7"), ("next", "0.1.7-rc.2")]);
+        assert_eq!(newest_dist_tag_version(&t).as_deref(), Some("0.1.7"));
+    }
+
+    #[test]
+    fn unparseable_tag_values_are_skipped() {
+        // A dist-tag is allowed to point at a non-version string.
+        let t = tags(&[("latest", "beta"), ("next", "0.1.6-alpha.2")]);
+        assert_eq!(newest_dist_tag_version(&t).as_deref(), Some("0.1.6-alpha.2"));
+    }
+
+    #[test]
+    fn no_parseable_tag_yields_none() {
+        let t = tags(&[("latest", "not-a-version")]);
+        assert_eq!(newest_dist_tag_version(&t), None);
+    }
 }

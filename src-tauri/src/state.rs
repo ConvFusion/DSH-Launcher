@@ -276,9 +276,17 @@ impl AppState {
                     let target = self.dsh_target_dir();
                     // Keep feeding the "Show Details" tail as well: it is the
                     // hint attached to the failure banner.
-                    runtime::installer::install_dsh(&node.path, &target, Some(on_line), Some(on_tail))
-                        .await
-                        .map_err(|e| (e, Some("Check the Details for the npm output.".into())))?
+                    // No explicit version: a first install takes the newest
+                    // build published on any channel.
+                    runtime::installer::install_dsh(
+                        &node.path,
+                        &target,
+                        None,
+                        Some(on_line),
+                        Some(on_tail),
+                    )
+                    .await
+                    .map_err(|e| (e, Some("Check the Details for the npm output.".into())))?
                 };
                 self.invalidate_env_cache();
                 let dsh = self

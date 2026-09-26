@@ -312,7 +312,10 @@ function AppShell({
   }
 
   // ---- Update DSH ----
-  async function updateDsh() {
+  // `targetVersion` is the release channel the user picked on the home page:
+  // the newest build or the maintainers' recommended one. Omitted for a first
+  // install, where the backend resolves the newest build itself.
+  async function updateDsh(targetVersion?: string) {
     const wasRunning = currentStatus.process.state === "running";
     setBusyPhase("updating");
     // Fresh log for this attempt; the backend streams every npm line into it.
@@ -321,12 +324,12 @@ function AppShell({
     setUpdateError(null);
     try {
       if (wasRunning) await api.stopDsh();
-      const version = await api.installDsh();
+      const installed = await api.installDsh(targetVersion);
       await refresh();
       if (wasRunning) await api.restartDsh(false);
       await refresh();
       checkUpdate();
-      notify(t("home.updated", { version }));
+      notify(t("home.updated", { version: installed }));
     } catch (e) {
       // Keep the streamed console log on screen: the toast is gone in a few
       // seconds, but the npm output is what explains the failure.

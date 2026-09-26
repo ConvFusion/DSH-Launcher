@@ -91,11 +91,25 @@ pub async fn install_node_runtime(
     Ok(version)
 }
 
+/// Install or update the DSH package.
+///
+/// `version` selects which release channel to install. The home page offers the
+/// maintainers' *recommended* build and the *newest* build on any channel as
+/// separate buttons, so the chosen one is passed through explicitly; `None`
+/// (a first install) resolves the newest build.
 #[tauri::command]
 pub async fn install_dsh_package(
     state: State<'_, AppState>,
     app: AppHandle,
+    version: Option<String>,
 ) -> Result<String, String> {
+    // This value is interpolated into an npm argument. It only ever comes from
+    // our own UI, but accept nothing but a real semver so the IPC surface can
+    // never hand npm an arbitrary package spec.
+    if let Some(v) = version.as_deref() {
+        semver::Version::parse(v)
+            .map_err(|_| format!("Refusing to install an unrecognised version: {v}"))?;
+    }
     let node = state
         .node()
         .ok_or_else(|| "No compatible Node.js runtime is available yet.".to_string())?;
@@ -110,38 +124,68 @@ pub async fn install_dsh_package(
         })
     };
     let target = state.dsh_target_dir();
-    let version =
-        runtime::installer::install_dsh(&node.path, &target, Some(on_line), None).await?;
+    let installed = runtime::installer::install_dsh(
+        &node.path,
+        &target,
+        version.as_deref(),
+        Some(on_line),
+        None,
+    )
+    .await?;
     state.invalidate_env_cache();
     let snap = state.proc.snapshot();
     let _ = app.emit("dsh://status", status_payload(&state, &snap));
-    Ok(version)
+    Ok(installed)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateInfo {
     pub installed: Option<String>,
+    /// Newest build published on any release channel.
     pub latest: Option<String>,
+    /// True when `latest` is worth installing over what is already there.
     pub update_available: bool,
+    /// The maintainers' recommended build — the `latest` npm dist-tag for DSH.
+    /// `None` for sources with a single channel (the launcher's own releases).
+    #[serde(default)]
+    pub recommended: Option<String>,
+    /// True when `recommended` is worth installing over what is already there.
+    #[serde(default)]
+    pub recommended_available: bool,
+}
+
+/// Whether `candidate` is a version worth offering over `installed`.
+///
+/// Semver-aware when both sides parse, so pre-releases order correctly
+/// (`0.1.5-rc.3` < `0.1.7-rc.2`); falls back to a plain inequality when either
+/// side does not look like a version.
+fn is_newer(installed: Option<&str>, candidate: Option<&str>) -> bool {
+    let Some(candidate) = candidate else {
+        return false;
+    };
+    match (
+        installed.and_then(|v| semver::Version::parse(v).ok()),
+        semver::Version::parse(candidate).ok(),
+    ) {
+        (Some(inst), Some(cand)) => inst < cand,
+        _ => installed.map(|i| i != candidate).unwrap_or(true),
+    }
 }
 
 #[tauri::command]
 pub async fn check_dsh_update(state: State<'_, AppState>) -> Result<UpdateInfo, String> {
     let installed = state.dsh().map(|d| d.version);
-    match runtime::installer::latest_dsh_version().await {
-        Ok(latest) => {
-            // Semver-aware comparison (handles pre-releases like 0.1.1-rc.2).
-            let update_available = match (
-                installed.as_deref().and_then(|v| semver::Version::parse(v).ok()),
-                semver::Version::parse(&latest).ok(),
-            ) {
-                (Some(inst), Some(lat)) => inst < lat,
-                _ => installed.as_deref().map(|i| i != latest).unwrap_or(true),
-            };
+    match runtime::installer::dsh_channels().await {
+        Ok(channels) => {
+            let update_available = is_newer(installed.as_deref(), channels.newest.as_deref());
+            let recommended_available =
+                is_newer(installed.as_deref(), channels.recommended.as_deref());
             Ok(UpdateInfo {
                 installed,
-                latest: Some(latest),
+                latest: channels.newest,
                 update_available,
+                recommended: channels.recommended,
+                recommended_available,
             })
         }
         Err(e) => {
@@ -150,6 +194,8 @@ pub async fn check_dsh_update(state: State<'_, AppState>) -> Result<UpdateInfo, 
                 installed,
                 latest: None,
                 update_available: false,
+                recommended: None,
+                recommended_available: false,
             })
         }
     }
@@ -210,6 +256,10 @@ pub async fn check_launcher_update() -> Result<UpdateInfo, String> {
         installed: Some(installed),
         latest: Some(latest),
         update_available,
+        // The launcher publishes a single channel, so there is no separate
+        // "recommended" build to offer.
+        recommended: None,
+        recommended_available: false,
     })
 }
 
@@ -1428,6 +1478,34 @@ pub fn suggest_ports(preferred: u16) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_newer_orders_pre_releases_by_semver_not_by_string() {
+        // The channel pair this feature exists for: once the newest build is
+        // installed, the older recommended build must not be offered back.
+        assert!(is_newer(Some("0.1.5-rc.3"), Some("0.1.7-rc.2")));
+        assert!(!is_newer(Some("0.1.7-rc.2"), Some("0.1.5-rc.3")));
+        assert!(!is_newer(Some("0.1.7-rc.2"), Some("0.1.7-rc.2")));
+    }
+
+    #[test]
+    fn is_newer_counts_a_final_release_over_its_release_candidate() {
+        assert!(is_newer(Some("0.1.7-rc.2"), Some("0.1.7")));
+    }
+
+    #[test]
+    fn is_newer_offers_any_build_when_nothing_is_installed() {
+        assert!(is_newer(None, Some("0.1.7-rc.2")));
+        // A channel that reports nothing is never an "update".
+        assert!(!is_newer(None, None));
+        assert!(!is_newer(Some("0.1.7-rc.2"), None));
+    }
+
+    #[test]
+    fn is_newer_falls_back_to_inequality_for_unparseable_versions() {
+        assert!(is_newer(Some("nightly"), Some("0.1.7-rc.2")));
+        assert!(!is_newer(Some("nightly"), Some("nightly")));
+    }
 
     fn args_ok(input: &str) -> Vec<String> {
         plugin_npx_args(input).unwrap_or_else(|e| panic!("{input:?} rejected: {e}"))

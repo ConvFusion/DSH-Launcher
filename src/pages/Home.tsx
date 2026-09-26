@@ -33,7 +33,8 @@ interface Props {
   consoleKind: ConsoleKind | null;
   onDismissUpdateLog: () => void;
   onMainAction: () => void;
-  onUpdate: () => void;
+  /** Install/update DSH; `version` picks the release channel (newest or recommended). */
+  onUpdate: (version?: string) => void;
   onStart: () => void;
   onStop: () => void;
   onRestart: () => void;
@@ -131,9 +132,37 @@ export default function Home({
     mainLabel = version ? t("home.open_v", { version }) : t("home.open");
   }
 
-  // Update only offered for installs we manage.
-  const showUpdate =
-    isInstalled && !isBusy && updateInfo?.update_available === true;
+  // ---- Update buttons: one per release channel ----
+  // DSH publishes several npm channels. `latest` is the newest build anywhere;
+  // `recommended` is what the maintainers pinned the `latest` dist-tag to. The
+  // two are routinely different (newest 0.1.7-rc.2 vs recommended 0.1.5-rc.3),
+  // so each gets its own button. When they coincide, one button carries both
+  // badges rather than showing the same version twice.
+  const updateTargets: {
+    version: string;
+    isNewest: boolean;
+    isRecommended: boolean;
+  }[] = [];
+  if (isInstalled && !isBusy && updateInfo) {
+    const newest = updateInfo.update_available ? updateInfo.latest : null;
+    const recommended = updateInfo.recommended_available
+      ? updateInfo.recommended
+      : null;
+    if (recommended) {
+      updateTargets.push({
+        version: recommended,
+        isRecommended: true,
+        isNewest: recommended === newest,
+      });
+    }
+    if (newest && newest !== recommended) {
+      updateTargets.push({
+        version: newest,
+        isNewest: true,
+        isRecommended: false,
+      });
+    }
+  }
 
   // ---- When are control buttons shown? ----
   // * Only when DSH is installed (not before install).
@@ -235,16 +264,31 @@ export default function Home({
         </div>
       )}
 
-      {/* Update button */}
-      {showUpdate && (
-        <button
-          className="btn small update"
-          onClick={onUpdate}
-        >
-          {updateInfo.latest
-            ? t("home.update_v", { version: updateInfo.latest })
-            : t("home.update")}
-        </button>
+      {/* Update buttons — one per release channel, each badged so it is clear
+          which build the user is opting into. Grouped: they are alternatives,
+          not two unrelated actions. */}
+      {updateTargets.length > 0 && (
+        <div className="update-choices">
+          {updateTargets.map((target) => (
+            <button
+              key={target.version}
+              className="btn small update"
+              onClick={() => onUpdate(target.version)}
+            >
+              {t("home.update_v", { version: target.version })}
+              {target.isNewest && (
+                <span className="badge badge-newest">
+                  {t("home.badge.latest")}
+                </span>
+              )}
+              {target.isRecommended && (
+                <span className="badge badge-recommended">
+                  {t("home.badge.recommended")}
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
       )}
 
       {/* URL (only when running) */}

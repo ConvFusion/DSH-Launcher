@@ -98,8 +98,17 @@ export interface EnvProgress {
 
 export interface UpdateInfo {
   installed: string | null;
+  /** Newest build published on any release channel. */
   latest: string | null;
+  /** True when `latest` is worth installing over what is already there. */
   update_available: boolean;
+  /**
+   * The maintainers' recommended build (the npm `latest` dist-tag for DSH).
+   * `null` for sources with a single channel — the launcher's own releases.
+   */
+  recommended: string | null;
+  /** True when `recommended` is worth installing over what is already there. */
+  recommended_available: boolean;
 }
 
 export interface PluginStatus {
