@@ -79,6 +79,8 @@ export default function Home({
   const procState = status.process.state;
   const [copied, setCopied] = useState(false);
   const [elapsed, setElapsed] = useState(0);
+  /** Target version of the pending update, awaiting the user's confirmation. */
+  const [pendingUpdate, setPendingUpdate] = useState<string | null>(null);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const logRef = useRef<HTMLPreElement | null>(null);
 
@@ -183,6 +185,30 @@ export default function Home({
     isBusy ||
     (procState === "starting" || procState === "stopping");
 
+  // The "Update to vX" buttons are easy to hit by accident, so they don't
+  // start the update directly: they open a confirmation dialog instead. Only
+  // a second, deliberate click on "Confirm update" triggers `onUpdate`.
+  function confirmUpdate() {
+    if (!pendingUpdate) return;
+    const target = pendingUpdate;
+    setPendingUpdate(null);
+    onUpdate(target);
+  }
+
+  function cancelUpdate() {
+    setPendingUpdate(null);
+  }
+
+  // Escape dismisses the dialog — same as clicking Cancel.
+  useEffect(() => {
+    if (!pendingUpdate) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setPendingUpdate(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [pendingUpdate]);
+
   async function copyUrl() {
     const url = status.process.url;
     try {
@@ -273,7 +299,7 @@ export default function Home({
             <button
               key={target.version}
               className="btn small update"
-              onClick={() => onUpdate(target.version)}
+              onClick={() => setPendingUpdate(target.version)}
             >
               {t("home.update_v", { version: target.version })}
               {target.isNewest && (
@@ -370,6 +396,48 @@ export default function Home({
       <div className="launcher-version">
         {t("home.launcher_version", { version: status.launcher_version })}
       </div>
+
+      {/* Confirmation dialog — a deliberate second step before updating, so an
+          accidental click on "Update to vX" never starts a long npm run (and
+          never stops a running DSH) by mistake. `position: fixed` takes it out
+          of the column's flow, so it overlays the whole window. */}
+      {pendingUpdate && (
+        <div
+          className="modal-overlay"
+          onClick={cancelUpdate}
+          role="presentation"
+        >
+          <div
+            className="modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="update-confirm-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-title" id="update-confirm-title">
+              {t("home.update_confirm_title")}
+            </div>
+            <div className="modal-body">
+              <div>
+                {t("home.update_confirm_body", { version: pendingUpdate })}
+              </div>
+              {isRunning && (
+                <div className="modal-note">
+                  {t("home.update_confirm_running_note")}
+                </div>
+              )}
+            </div>
+            <div className="modal-actions">
+              <button className="btn secondary" onClick={cancelUpdate} autoFocus>
+                {t("home.update_confirm_cancel")}
+              </button>
+              <button className="btn primary" onClick={confirmUpdate}>
+                {t("home.update_confirm_ok")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
