@@ -7,7 +7,7 @@
 //! `Child` only reacts to the process exiting. This avoids fighting over
 //! ownership of the `Child` between concurrent commands.
 
-use super::health;
+use super::{health, identity::{self, ProcessIdentity}};
 use crate::config::{self, log, now_stamp, ProcessStateFile};
 use crate::runtime::detector;
 use crate::runtime::{DshInfo, NodeInfo};
@@ -178,6 +178,7 @@ impl StartOutcome {
 struct Inner {
     state: ProcessState,
     pid: Option<u32>,
+    identity: Option<ProcessIdentity>,
     host: String,
     port: u16,
     /// Full URL with auth token, parsed from dsh web output (e.g.
@@ -201,6 +202,7 @@ impl Inner {
         Self {
             state: ProcessState::Stopped,
             pid: None,
+            identity: None,
             host,
             port,
             token_url: None,
@@ -235,11 +237,17 @@ impl Inner {
 #[derive(Clone)]
 pub struct ProcessManager {
     inner: Arc<Mutex<Inner>>,
+    state_path: Arc<std::path::PathBuf>,
 }
 
 impl ProcessManager {
     pub fn new(host: &str, port: u16) -> Self {
+        Self::with_state_path(host, port, config::state_path())
+    }
+
+    fn with_state_path(host: &str, port: u16, state_path: std::path::PathBuf) -> Self {
         Self {
+            state_path: Arc::new(state_path),
             inner: Arc::new(Mutex::new(Inner::new(
                 host.to_string(),
                 port,
@@ -283,7 +291,7 @@ impl ProcessManager {
         }
     }
 
-    fn emit_status(app: &AppHandle) {
+    fn emit_status<R: tauri::Runtime>(app: &AppHandle<R>) {
         // Resolved through the manager map — see state.rs.
         let Some(state) = app.try_state::<crate::state::AppState>() else {
             return;
@@ -302,33 +310,35 @@ impl ProcessManager {
 
     /// Adopt a running instance:
     ///
-    /// 1. a previously started instance recorded in `state.json` (pid alive
-    ///    and HTTP responds), or
-    /// 2. **anything already serving HTTP on the configured port** — e.g. a
-    ///    `dsh web` started manually in a terminal. Such an instance is
+    /// 1. a verified DSH process recorded in `state.json`, or
+    /// 2. a verified local DSH web process listening on the configured port,
+    ///    e.g. `dsh web` started manually. Such an instance is
     ///    adopted as `external`: shown as Running, never spawned by us.
     ///
     /// Returns true when we are now Running.
-    pub async fn try_adopt(&self, app: &AppHandle) -> bool {
+    pub async fn try_adopt<R: tauri::Runtime>(&self, app: &AppHandle<R>) -> bool {
         // 1. Managed instance from a previous launcher run.
-        if let Some(st) = config::read_process_state() {
-            if health::process_alive(st.pid) && health::http_ok(&st.host, st.port).await {
-                let mut g = self.inner.lock().unwrap();
-                g.host = st.host.clone();
-                g.port = st.port;
-                g.pid = Some(st.pid);
-                g.started_at = Some(st.started_at.clone());
-                g.token_url = st.token_url.clone();
-                g.external = false;
-                g.state = ProcessState::Running;
-                g.error = None;
-                g.error_details = None;
-                drop(g);
-                log(&format!("adopted running instance pid={} port={}", st.pid, st.port));
-                Self::emit_status(app);
-                return true;
+        if let Some(st) = config::read_process_state(&self.state_path) {
+            if let Some((pid, process)) = verified_listener(&st.host, st.port).await {
+                if pid == st.pid && st.process_start_time.map(|t| t == process.start_time).unwrap_or(true) {
+                    let mut g = self.inner.lock().unwrap();
+                    g.host = st.host.clone();
+                    g.port = st.port;
+                    g.pid = Some(st.pid);
+                    g.identity = Some(process);
+                    g.started_at = Some(st.started_at.clone());
+                    g.token_url = st.token_url.clone();
+                    g.external = false;
+                    g.state = ProcessState::Running;
+                    g.error = None;
+                    g.error_details = None;
+                    drop(g);
+                    log(&format!("adopted running instance pid={} port={}", st.pid, st.port));
+                    Self::emit_status(app);
+                    return true;
+                }
             }
-            config::clear_process_state();
+            config::clear_process_state(&self.state_path);
         }
 
         // 2. External instance: probe the configured host:port for an HTTP
@@ -337,12 +347,12 @@ impl ProcessManager {
             let g = self.inner.lock().unwrap();
             (g.host.clone(), g.port)
         };
-        if health::http_ok(&host, port).await {
-            let pid = health::listener_pid(&host, port);
+        if let Some((pid, process)) = verified_listener(&host, port).await {
             let mut g = self.inner.lock().unwrap();
             g.host = host.clone();
             g.port = port;
-            g.pid = pid;
+            g.pid = Some(pid);
+            g.identity = Some(process);
             g.started_at = None;
             g.external = true;
             g.state = ProcessState::Running;
@@ -362,18 +372,18 @@ impl ProcessManager {
     /// Spawn the harness, wait for HTTP readiness, and report.
     ///
     /// Browser opening is handled by the caller once we return "ready".
-    pub async fn start(
+    pub async fn start<R: tauri::Runtime>(
         &self,
-        app: &AppHandle,
+        app: &AppHandle<R>,
         node: &NodeInfo,
         dsh: &DshInfo,
     ) -> StartOutcome {
-        let (state, pid) = {
+        let (state, pid, process) = {
             let g = self.inner.lock().unwrap();
-            (g.state, g.pid)
+            (g.state, g.pid, g.identity.clone())
         };
         if matches!(state, ProcessState::Starting | ProcessState::Running)
-            && pid.map(health::process_alive).unwrap_or(false)
+            && pid.zip(process).map(|(pid, process)| identity::matches(pid, &process)).unwrap_or(false)
         {
             let port = self.inner.lock().unwrap().port;
             return StartOutcome::already_running(port);
@@ -508,17 +518,30 @@ impl ProcessManager {
             }
         };
         let pid = child.id().unwrap_or(0);
+        let Some(process) = identity::read(pid) else {
+            let _ = child.kill().await;
+            let message = "Unable to verify the new DSH process identity.".to_string();
+            {
+                let mut g = self.inner.lock().unwrap();
+                g.state = ProcessState::Error;
+                g.error = Some(message.clone());
+            }
+            Self::emit_status(app);
+            return StartOutcome::error(message, None);
+        };
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         {
             let mut g = self.inner.lock().unwrap();
             g.pid = Some(pid);
+            g.identity = Some(process.clone());
         }
-        config::write_process_state(&ProcessStateFile {
+        config::write_process_state(&self.state_path, &ProcessStateFile {
             pid,
             host: host.clone(),
             port,
             started_at: now_stamp(),
+            process_start_time: Some(process.start_time),
             token_url: None,
         });
 
@@ -527,10 +550,10 @@ impl ProcessManager {
         // the token URL is discovered (see `reader_task`).
         let inner = Arc::clone(&self.inner);
         if let Some(out) = stdout {
-            tokio::spawn(reader_task(out, inner.clone(), app.clone()));
+            tokio::spawn(reader_task(out, inner.clone(), app.clone(), self.state_path.clone()));
         }
         if let Some(err) = stderr {
-            tokio::spawn(reader_task_err(err, inner, app.clone()));
+            tokio::spawn(reader_task_err(err, inner, app.clone(), self.state_path.clone()));
         }
 
         // Monitor: owns the child; records the exit.
@@ -538,13 +561,17 @@ impl ProcessManager {
         let app2 = app.clone();
         let host2 = host.clone();
         let port2 = port;
+        let state_path = self.state_path.clone();
         tokio::spawn(async move {
             let status = child.wait().await;
             let exit_code = status.as_ref().ok().and_then(|s| s.code());
             let succeeded = status.as_ref().map(|s| s.success()).unwrap_or(false);
-            config::clear_process_state();
             let mut g = inner2.lock().unwrap();
+            // An older child must not clear the state of a newer instance.
+            if g.pid != Some(pid) { return; }
+            config::clear_process_state(&state_path);
             g.pid = None;
+            g.identity = None;
             let stop_requested = g.stop_requested;
             if !g.stop_requested {
                 let expected = succeeded;
@@ -624,10 +651,10 @@ impl ProcessManager {
     }
 
     /// Graceful stop: SIGTERM (or TerminateProcess), then force kill after 5s.
-    pub async fn stop(&self, app: &AppHandle) -> Result<(), String> {
-        let (pid, external) = {
+    pub async fn stop<R: tauri::Runtime>(&self, app: &AppHandle<R>) -> Result<(), String> {
+        let (pid, external, process) = {
             let g = self.inner.lock().unwrap();
-            (g.pid, g.external)
+            (g.pid, g.external, g.identity.clone())
         };
         let Some(pid) = pid else {
             let mut g = self.inner.lock().unwrap();
@@ -646,13 +673,15 @@ impl ProcessManager {
             if g.state != ProcessState::Stopped {
                 g.state = ProcessState::Stopped;
             }
+            drop(g);
             Self::emit_status(app);
             return Ok(());
         };
         if !health::process_alive(pid) {
-            config::clear_process_state();
+            config::clear_process_state(&self.state_path);
             let mut g = self.inner.lock().unwrap();
             g.pid = None;
+            g.identity = None;
             g.state = ProcessState::Stopped;
             g.stop_requested = false;
             drop(g);
@@ -660,6 +689,10 @@ impl ProcessManager {
             return Ok(());
         }
 
+        let process = process.ok_or("Refusing to stop an unverified process.")?;
+        if !identity::matches(pid, &process) {
+            return Err("The process identity changed; refusing to stop a possibly unrelated process.".into());
+        }
         {
             let mut g = self.inner.lock().unwrap();
             g.state = ProcessState::Stopping;
@@ -667,21 +700,36 @@ impl ProcessManager {
         }
         Self::emit_status(app);
         log(&format!("stopping harness pid={pid}"));
+        // Status emission can take time; re-check immediately before signaling.
+        if !identity::matches(pid, &process) {
+            let message = "The process identity changed before termination; no signal was sent.";
+            {
+                let mut g = self.inner.lock().unwrap();
+                if g.pid == Some(pid) && g.identity.as_ref() == Some(&process) {
+                    g.state = ProcessState::Error;
+                    g.error = Some(message.into());
+                    g.stop_requested = false;
+                }
+            }
+            Self::emit_status(app);
+            return Err(message.into());
+        }
         health::signal_terminate(pid);
 
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(100)).await;
-            if !health::process_alive(pid) {
+            if !identity::matches(pid, &process) {
                 break;
             }
         }
-        if health::process_alive(pid) {
+        if identity::matches(pid, &process) {
             log(&format!("harness pid={pid} did not exit, force killing"));
             health::signal_kill(pid);
         }
-        config::clear_process_state();
+        config::clear_process_state(&self.state_path);
         let mut g = self.inner.lock().unwrap();
         g.pid = None;
+        g.identity = None;
         g.state = ProcessState::Stopped;
         g.error = None;
         g.stop_requested = false;
@@ -699,7 +747,7 @@ impl ProcessManager {
     ///   service started manually while the launcher was open).
     ///
     /// Emits a status update only when the state actually changed.
-    pub async fn poll_status(&self, app: &AppHandle) {
+    pub async fn poll_status<R: tauri::Runtime>(&self, app: &AppHandle<R>) {
         let (state, host, port) = {
             let g = self.inner.lock().unwrap();
             (g.state, g.host.clone(), g.port)
@@ -715,9 +763,10 @@ impl ProcessManager {
                 if g.state == ProcessState::Running && !g.stop_requested {
                     g.state = ProcessState::Stopped;
                     g.pid = None;
+                    g.identity = None;
                     g.error = None;
                     g.error_details = None;
-                    config::clear_process_state();
+                    config::clear_process_state(&self.state_path);
                     log(&format!("health poll: harness at {host}:{port} is gone"));
                     drop(g);
                     Self::emit_status(app);
@@ -737,10 +786,23 @@ impl ProcessManager {
     }
 }
 
-async fn reader_task(
+/// A listening port and a successful HTTP response are not a process identity.
+async fn verified_listener(host: &str, port: u16) -> Option<(u32, ProcessIdentity)> {
+    let pid = health::listener_pid(host, port)?;
+    let process = identity::read(pid)?;
+    if !health::http_ok(host, port).await
+        || health::listener_pid(host, port) != Some(pid)
+        || !identity::matches(pid, &process) {
+        return None;
+    }
+    Some((pid, process))
+}
+
+async fn reader_task<R: tauri::Runtime>(
     pipe: tokio::process::ChildStdout,
     inner: Arc<Mutex<Inner>>,
-    app: AppHandle,
+    app: AppHandle<R>,
+    state_path: Arc<std::path::PathBuf>,
 ) {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let mut lines = BufReader::new(pipe).lines();
@@ -756,7 +818,7 @@ async fn reader_task(
             if g.token_url.is_none() {
                 if let Some(url) = extract_token_url(&line) {
                     g.token_url = Some(url.clone());
-                    Some((g.pid, g.host.clone(), g.port, g.started_at.clone(), url))
+                    Some((g.pid, g.host.clone(), g.port, g.started_at.clone(), g.identity.as_ref().map(|p| p.start_time), url))
                 } else {
                     None
                 }
@@ -765,14 +827,15 @@ async fn reader_task(
             }
         };
         // Persist the token URL so restarting the launcher keeps the URL valid.
-        if let Some((pid, host, port, started_at, token_url)) = maybe_token {
+        if let Some((pid, host, port, started_at, process_start_time, token_url)) = maybe_token {
             if let Some(pid) = pid {
                 let started_at = started_at.unwrap_or_else(now_stamp);
-                config::write_process_state(&ProcessStateFile {
+                config::write_process_state(&state_path, &ProcessStateFile {
                     pid,
                     host,
                     port,
                     started_at,
+                    process_start_time,
                     token_url: Some(token_url),
                 });
             }
@@ -786,10 +849,11 @@ async fn reader_task(
     }
 }
 
-async fn reader_task_err(
+async fn reader_task_err<R: tauri::Runtime>(
     pipe: tokio::process::ChildStderr,
     inner: Arc<Mutex<Inner>>,
-    app: AppHandle,
+    app: AppHandle<R>,
+    state_path: Arc<std::path::PathBuf>,
 ) {
     use tokio::io::{AsyncBufReadExt, BufReader};
     let mut lines = BufReader::new(pipe).lines();
@@ -807,7 +871,7 @@ async fn reader_task_err(
             if g.token_url.is_none() {
                 if let Some(url) = extract_token_url(&line) {
                     g.token_url = Some(url.clone());
-                    Some((g.pid, g.host.clone(), g.port, g.started_at.clone(), url))
+                    Some((g.pid, g.host.clone(), g.port, g.started_at.clone(), g.identity.as_ref().map(|p| p.start_time), url))
                 } else {
                     None
                 }
@@ -815,14 +879,15 @@ async fn reader_task_err(
                 None
             }
         };
-        if let Some((pid, host, port, started_at, token_url)) = maybe_token {
+        if let Some((pid, host, port, started_at, process_start_time, token_url)) = maybe_token {
             if let Some(pid) = pid {
                 let started_at = started_at.unwrap_or_else(now_stamp);
-                config::write_process_state(&ProcessStateFile {
+                config::write_process_state(&state_path, &ProcessStateFile {
                     pid,
                     host,
                     port,
                     started_at,
+                    process_start_time,
                     token_url: Some(token_url),
                 });
             }
@@ -893,3 +958,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "regression_tests.rs"]
+mod regression_tests;

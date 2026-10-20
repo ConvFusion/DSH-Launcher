@@ -35,6 +35,11 @@ hex = "0.4"
 time = { version = "0.3", features = ["local-offset", "macros"] }
 libc = "0.2"
 semver = "1"
+sysinfo = { version = "0.30.13", default-features = false }
+
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
