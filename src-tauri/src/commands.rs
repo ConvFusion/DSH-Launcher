@@ -498,12 +498,24 @@ pub struct ConfigPatch {
     pub node_path: Option<String>,
 }
 
+/// Keep native window chrome in sync with the saved web UI preference.
+/// `None` clears an explicit override and resumes following the OS theme.
+pub(crate) fn apply_theme(app: &AppHandle, theme: &str) {
+    app.set_theme(match theme {
+        "light" => Some(tauri::Theme::Light),
+        "dark" => Some(tauri::Theme::Dark),
+        _ => None,
+    });
+}
+
 #[tauri::command]
 pub fn update_config(
     state: State<'_, AppState>,
     app: AppHandle,
     patch: ConfigPatch,
 ) -> Result<Config, String> {
+    let theme_changed = patch.theme.is_some();
+    let env_changed = patch.node_path.is_some() || patch.dsh_dir.is_some();
     let mut cfg = state.cfg.lock().unwrap().clone();
     if let Some(host) = patch.host.filter(|h| !h.trim().is_empty()) {
         let host = host.trim().to_string();
@@ -602,9 +614,19 @@ pub fn update_config(
         }
     }
     cfg.save()?;
+    // Publish only after persistence succeeds. Status events and subsequent
+    // patches must read the new config, not the stale pre-save snapshot.
+    *state.cfg.lock().unwrap() = cfg.clone();
+    if theme_changed {
+        apply_theme(&app, &cfg.theme);
+    }
     // Apply to the live manager (affects the next start).
     state.proc.set_target(&cfg.server.host, cfg.server.port);
-    state.invalidate_env_cache();
+    // Appearance changes do not affect Node/DSH/browser detection. Avoid
+    // blocking theme updates on a full environment scan.
+    if env_changed {
+        state.invalidate_env_cache();
+    }
     let snap = state.proc.snapshot();
     let _ = app.emit("dsh://status", status_payload(&state, &snap));
     Ok(cfg)
