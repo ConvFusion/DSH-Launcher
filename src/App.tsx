@@ -377,7 +377,7 @@ function AppShell({
         {inSettings ? (
           <Settings status={status} notify={notify} onChanged={refresh} />
         ) : inPlugins ? (
-          <Plugins notify={notify} onChanged={refresh} />
+          <Plugins status={status} notify={notify} onChanged={refresh} />
         ) : (
           <Home
             status={status}
