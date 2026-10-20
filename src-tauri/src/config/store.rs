@@ -186,27 +186,32 @@ pub struct ProcessStateFile {
     pub host: String,
     pub port: u16,
     pub started_at: String,
+    /// OS process creation time; absent in state files from older launchers.
+    #[serde(default)]
+    pub process_start_time: Option<u64>,
     /// Full URL with auth token (dsh >= 0.1.2-rc.1). None for older versions.
     #[serde(default)]
     pub token_url: Option<String>,
 }
 
-pub fn read_process_state() -> Option<ProcessStateFile> {
-    let s = fs::read_to_string(state_path()).ok()?;
+pub fn read_process_state(path: &Path) -> Option<ProcessStateFile> {
+    let s = fs::read_to_string(path).ok()?;
     serde_json::from_str(&s).ok()
 }
 
-pub fn write_process_state(st: &ProcessStateFile) {
-    ensure_dirs();
+pub fn write_process_state(path: &Path, st: &ProcessStateFile) {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
     if let Ok(json) = serde_json::to_string_pretty(st) {
-        if let Err(e) = fs::write(state_path(), json) {
+        if let Err(e) = fs::write(path, json) {
             log(&format!("failed to write state.json: {e}"));
         }
     }
 }
 
-pub fn clear_process_state() {
-    let _ = fs::remove_file(state_path());
+pub fn clear_process_state(path: &Path) {
+    let _ = fs::remove_file(path);
 }
 
 // ---------------------------------------------------------------------------

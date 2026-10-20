@@ -71,7 +71,7 @@ impl AppState {
     }
 
     /// Emit the current status to the UI and refresh the tray.
-    pub fn push_status(&self, app: &AppHandle) {
+    pub fn push_status<R: tauri::Runtime>(&self, app: &AppHandle<R>) {
         let snap = self.proc.snapshot();
         let _ = app.emit("dsh://status", status_payload(self, &snap));
         if let Some((tray, menu)) = self.tray.lock().unwrap().as_ref() {

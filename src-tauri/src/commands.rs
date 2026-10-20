@@ -358,7 +358,9 @@ pub async fn restart_dsh_impl(
     app: &AppHandle,
     open_browser: Option<bool>,
 ) -> StartOutcome {
-    let _ = state.proc.stop(app).await;
+    if let Err(error) = state.proc.stop(app).await {
+        return StartOutcome::error(error, None);
+    }
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     start_dsh_inner(state, app, open_browser).await
 }
@@ -369,7 +371,12 @@ pub async fn restart_dsh(
     app: AppHandle,
     open_browser: Option<bool>,
 ) -> Result<StartOutcome, String> {
-    Ok(restart_dsh_impl(&state, &app, open_browser).await)
+    let outcome = restart_dsh_impl(&state, &app, open_browser).await;
+    if outcome.ok {
+        Ok(outcome)
+    } else {
+        Err(outcome.message.unwrap_or_else(|| "Unable to restart DeepSeek Harness.".into()))
+    }
 }
 
 /// Open the harness URL in the browser (tray "Open Harness" / home button).
