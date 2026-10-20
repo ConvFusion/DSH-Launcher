@@ -891,11 +891,16 @@ body {
   color: var(--muted);
 }
 
-/* "Slow network, retrying…" warning banner. */
-.plugin-banner.warn {
+/* Warning colors for network retries and plugin removal. */
+.plugin-banner.warn,
+.plugin-banner.removed,
+.plugin-banner.busy.removing {
   background: rgba(245, 166, 35, 0.1);
   border: 1px solid rgba(245, 166, 35, 0.4);
   color: #d98a1f;
+}
+
+.plugin-banner.warn {
   font-size: 12.5px;
 }
 

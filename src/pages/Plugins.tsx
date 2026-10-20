@@ -3,13 +3,23 @@ import { listen } from "@tauri-apps/api/event";
 import { api } from "../api";
 import { useI18n } from "../i18n";
 import type { MessageKey } from "../i18n/messages";
+import type { LauncherStatus } from "../types";
 
 interface Props {
+  status: LauncherStatus;
   notify: (msg: string) => void;
   onChanged: () => void;
 }
 
-type DoneState = null | "ok" | "err" | "already" | "removed" | "notinstalled";
+type Operation =
+  | { kind: "install" | "restart" }
+  | { kind: "remove"; pkg: string };
+
+type DoneState =
+  | null
+  | { kind: "ok" | "already" | "removed"; wasRunning: boolean }
+  | { kind: "err"; operation: "install" | "remove" }
+  | { kind: "notinstalled" };
 
 /** Our own plugins, offered under the install button as one-click links.
  *  `pkg` is the npm package name (used by install idempotency + removal). */
@@ -49,15 +59,20 @@ function formatElapsed(totalSeconds: number) {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
-export default function Plugins({ notify, onChanged }: Props) {
+export default function Plugins({ status, notify, onChanged }: Props) {
   const { t } = useI18n();
   const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [operation, setOperation] = useState<Operation | null>(null);
+  const busy = operation !== null;
   const [elapsed, setElapsed] = useState(0);
   /** True once a log line indicates the downloader is retrying (slow network). */
   const [retryHint, setRetryHint] = useState(false);
   const [lines, setLines] = useState<string[]>([]);
   const [done, setDone] = useState<DoneState>(null);
+  // Only offer a restart for a service that was running before the change
+  // and is still running. A stopped service will load the changes on startup.
+  const needsRestart = done !== null && "wasRunning" in done &&
+    done.wasRunning && status.process.state === "running";
   /** Installed status of the two supported plugins, keyed by package name. */
   const [installed, setInstalled] = useState<Record<string, boolean>>({});
   const outRef = useRef<HTMLPreElement | null>(null);
@@ -128,22 +143,23 @@ export default function Plugins({ notify, onChanged }: Props) {
 
   async function install() {
     if (!trimmed || busy) return;
-    setBusy(true);
+    const wasRunning = status.process.state === "running";
+    setOperation({ kind: "install" });
     resetResult();
     try {
       const res = await api.installPlugin(trimmed);
       if (res === "already-installed") {
-        setDone("already");
+        setDone({ kind: "already", wasRunning });
       } else {
-        setDone("ok");
+        setDone({ kind: "ok", wasRunning });
       }
       await refreshInstalled();
       onChanged();
     } catch (e) {
-      setDone("err");
+      setDone({ kind: "err", operation: "install" });
       notify(String(e));
     } finally {
-      setBusy(false);
+      setOperation(null);
     }
   }
 
@@ -158,30 +174,29 @@ export default function Plugins({ notify, onChanged }: Props) {
   // Remove one of the launcher's own plugins from the web profile.
   async function removePlugin(pkg: string) {
     if (busy) return;
-    setBusy(true);
+    const wasRunning = status.process.state === "running";
+    setOperation({ kind: "remove", pkg });
     resetResult();
     try {
       const res = await api.removePlugin(pkg);
       if (res === "removed") {
-        setDone("removed");
-        notify(t("plugins.removed"));
+        setDone({ kind: "removed", wasRunning });
       } else {
-        setDone("notinstalled");
-        notify(t("plugins.not_installed"));
+        setDone({ kind: "notinstalled" });
       }
       await refreshInstalled();
       onChanged();
     } catch (e) {
-      setDone("err");
-      notify(String(e));
+      setDone({ kind: "err", operation: "remove" });
+      setLines((prev) => [...prev, String(e)]);
     } finally {
-      setBusy(false);
+      setOperation(null);
     }
   }
 
   async function restartNow() {
-    if (busy) return;
-    setBusy(true);
+    if (busy || !needsRestart) return;
+    setOperation({ kind: "restart" });
     resetResult();
     try {
       await api.restartDsh(false);
@@ -190,7 +205,7 @@ export default function Plugins({ notify, onChanged }: Props) {
     } catch (e) {
       notify(String(e));
     } finally {
-      setBusy(false);
+      setOperation(null);
     }
   }
 
@@ -205,7 +220,9 @@ export default function Plugins({ notify, onChanged }: Props) {
           <li>{t("plugins.desc_path")}</li>
           <li>{t("plugins.desc_npx")}</li>
         </ul>
-        <p className="desc">{t("plugins.desc_restart")}</p>
+        {status.process.state === "running" && (
+          <p className="desc">{t("plugins.desc_restart")}</p>
+        )}
 
         <div className="plugin-input">
           <input
@@ -229,7 +246,7 @@ export default function Plugins({ notify, onChanged }: Props) {
             disabled={busy || !name.trim()}
             onClick={install}
           >
-            {busy && <span className="spinner" />}
+            {operation?.kind === "install" && <span className="spinner" />}
             {t("plugins.install")}
           </button>
         </div>
@@ -262,7 +279,9 @@ export default function Plugins({ notify, onChanged }: Props) {
                       disabled={busy}
                       onClick={() => removePlugin(p.pkg)}
                     >
-                      {t("plugins.remove")}
+                      {operation?.kind === "remove" && operation.pkg === p.pkg ? (
+                        <><span className="spinner" />{t("plugins.removing")}</>
+                      ) : t("plugins.remove")}
                     </button>
                   </div>
                 )}
@@ -272,65 +291,81 @@ export default function Plugins({ notify, onChanged }: Props) {
           <div className="recommended-hint">{t("plugins.rec_hint")}</div>
         </div>
 
-        {willRun && !busy && (
+        {willRun && !busy && !done && (
           <div className="plugin-willrun">
             <span className="willrun-label">{t("plugins.will_run")}</span>
             <code>{willRun}</code>
           </div>
         )}
 
-        {/* Busy: reassure the user the install is alive and may be slow. */}
-        {busy && (
-          <div className="plugin-banner busy">
+        {/* Progress belongs to the active operation, not always an install. */}
+        {operation && (
+          <div className={`plugin-banner busy${operation.kind === "remove" ? " removing" : ""}`}>
             <span className="spinner" />
             <div>
               <div className="banner-title">
-                {t("plugins.installing")}
+                {t(operation.kind === "remove" ? "plugins.removing_title" :
+                  operation.kind === "restart" ? "plugins.restarting" : "plugins.installing")}
                 <span className="elapsed">{formatElapsed(elapsed)}</span>
               </div>
-              <div className="banner-sub">{t("plugins.installing_hint")}</div>
+              {operation.kind !== "restart" && (
+                <div className="banner-sub">
+                  {t(operation.kind === "remove" ? "plugins.removing_hint" : "plugins.installing_hint")}
+                </div>
+              )}
             </div>
           </div>
         )}
-        {busy && retryHint && (
+        {operation?.kind === "install" && retryHint && (
           <div className="plugin-banner warn">⚠ {t("plugins.retry_hint")}</div>
         )}
 
-        {done === "ok" && (
+        {done?.kind === "ok" && (
           <div className="plugin-banner ok">
             <div>
               <div className="banner-title">{t("plugins.restart_hint_title")}</div>
-              <div className="banner-sub">{t("plugins.restart_hint_sub")}</div>
+              {needsRestart && <div className="banner-sub">{t("plugins.restart_hint_sub")}</div>}
             </div>
-            <button className="btn small" disabled={busy} onClick={restartNow}>
-              ↻ {t("plugins.restart_now")}
-            </button>
+            {needsRestart && (
+              <button className="btn small" disabled={busy} onClick={restartNow}>
+                ↻ {t("plugins.restart_now")}
+              </button>
+            )}
           </div>
         )}
-        {done === "already" && (
+        {done?.kind === "already" && (
           <div className="plugin-banner ok">
             <div>
               <div className="banner-title">{t("plugins.already_title")}</div>
               <div className="banner-sub">{t("plugins.already_sub")}</div>
             </div>
-            <button className="btn small" disabled={busy} onClick={restartNow}>
-              ↻ {t("plugins.restart_now")}
-            </button>
+            {needsRestart && (
+              <button className="btn small" disabled={busy} onClick={restartNow}>
+                ↻ {t("plugins.restart_now")}
+              </button>
+            )}
           </div>
         )}
-        {done === "removed" && (
-          <div className="plugin-banner ok">
+        {done?.kind === "removed" && (
+          <div className="plugin-banner removed">
             <div>
               <div className="banner-title">{t("plugins.removed_title")}</div>
-              <div className="banner-sub">{t("plugins.removed_sub")}</div>
+              {needsRestart && <div className="banner-sub">{t("plugins.removed_sub")}</div>}
             </div>
-            <button className="btn small" disabled={busy} onClick={restartNow}>
-              ↻ {t("plugins.restart_now")}
-            </button>
+            {needsRestart && (
+              <button className="btn small" disabled={busy} onClick={restartNow}>
+                ↻ {t("plugins.restart_now")}
+              </button>
+            )}
           </div>
         )}
-        {done === "err" && (
-          <div className="plugin-banner err">{t("plugins.install_failed")}</div>
+        {done?.kind === "notinstalled" && (
+          <div className="plugin-banner removed">{t("plugins.not_installed")}</div>
+        )}
+        {done?.kind === "err" && (
+          <div className="plugin-banner err">
+            {t(done.operation === "remove" ? "plugins.remove_failed" : "plugins.install_failed")}
+          </div>
         )}
 
         {(busy || lines.length > 0) && (
