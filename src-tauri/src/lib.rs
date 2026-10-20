@@ -48,6 +48,8 @@ pub fn run(launched_by_autostart: bool) {
         })
         .setup(|app| {
             let handle = app.handle().clone();
+            let theme = app.state::<AppState>().cfg.lock().unwrap().theme.clone();
+            commands::apply_theme(&handle, &theme);
             let (tray_icon, tray_menu) = tray::build_tray(&handle)?;
             if let Some(state) = app.try_state::<AppState>() {
                 *state.tray.lock().unwrap() = Some((tray_icon, tray_menu));

@@ -122,7 +122,7 @@ export default function Settings({ status, notify, onChanged }: Props) {
         <h3>{t("settings.theme")}</h3>
         <p className="desc">{t("settings.theme_desc")}</p>
         {(["system", "light", "dark"] as const).map((th) => (
-          <div className="setting-row" key={th}>
+          <label className="setting-row" key={th}>
             <div>
               <div className="label">{t(`settings.theme.${th}`)}</div>
               <div className="hint">
@@ -137,7 +137,7 @@ export default function Settings({ status, notify, onChanged }: Props) {
               disabled={busy === "theme"}
               onChange={() => changeTheme(th)}
             />
-          </div>
+          </label>
         ))}
       </div>
 
