@@ -694,11 +694,12 @@ pub fn diagnose_environment() -> Vec<String> {
 /// logs/launcher.log        startup + lifecycle events
 /// logs/install.log(.old)   full Node/DSH/plugin install command output
 /// logs/harness.log(.old)   DSH runtime (web server) output
-/// config.json, state.json  user settings + last process record
+/// config.json, state.json  settings + process fields, with credentials redacted
 /// diagnostics.txt          live environment report (node/npm/dsh detection)
 /// meta.txt                 launcher version, OS, arch, data dir, timestamp
 /// ```
 ///
+/// Credential values are redacted; ordinary URL parameters and fields remain.
 /// The zip is written into the app data directory (`~/.dsh-launcher`) and
 /// revealed (selected) in the OS file manager, so even non-technical users
 /// can find and attach it. Returns the path of the created file.
@@ -771,7 +772,9 @@ fn zip_write_bytes(
     use std::io::Write;
     zw.start_file(name, opts.clone())
         .map_err(|e| format!("zip {name}: {e}"))?;
-    zw.write_all(data).map_err(|e| format!("zip {name}: {e}"))
+    // Every member, including generated diagnostics/meta, crosses this boundary.
+    let data = config::diagnostic_file(name, data)?;
+    zw.write_all(&data).map_err(|e| format!("zip {name}: {e}"))
 }
 
 fn zip_write_text(
@@ -1507,6 +1510,130 @@ pub fn suggest_ports(preferred: u16) -> Vec<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_archive_excludes_authentication_material() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("bundle.zip");
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(&dest).unwrap());
+        let opts = zip::write::FileOptions::default();
+        let secret = "synthetic-archive-secret";
+        let url = format!("http://127.0.0.1:3080/?foo='&token={secret}&token=second-secret");
+        for name in [
+            "launcher.log",
+            "install.log",
+            "install.log.old",
+            "harness.log",
+            "harness.log.old",
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(
+                &path,
+                format!("version 0.1.6\nopened {url}\nERROR: connection refused\n"),
+            )
+            .unwrap();
+            zip_add_file(&mut zw, &opts, &format!("logs/{name}"), &path).unwrap();
+        }
+        let state = dir.path().join("state.json");
+        std::fs::write(
+            &state,
+            serde_json::json!({
+                "pid": 123, "host": "127.0.0.1", "port": 3080,
+                "started_at": "test-start", "process_start_time": 42,
+                "token_url": url, "future_secret": secret
+            })
+            .to_string(),
+        )
+        .unwrap();
+        zip_add_file(&mut zw, &opts, "state.json", &state).unwrap();
+        zip_write_text(
+            &mut zw,
+            &opts,
+            "diagnostics.txt",
+            &format!("Node v22 {url}"),
+        )
+        .unwrap();
+        zip_write_text(&mut zw, &opts, "meta.txt", &format!("version 0.1.6 {url}")).unwrap();
+        zw.finish().unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(dest).unwrap()).unwrap();
+        for i in 0..archive.len() {
+            let mut member = archive.by_index(i).unwrap();
+            let name = member.name().to_string();
+            let mut text = String::new();
+            member.read_to_string(&mut text).unwrap();
+            assert!(!text.contains(secret), "credential leaked in {name}");
+            assert!(
+                !text.contains("second-secret"),
+                "duplicate token leaked in {name}"
+            );
+            if name == "state.json" {
+                let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                assert_eq!(
+                    value["token_url"],
+                    "http://127.0.0.1:3080/?foo='&token=[REDACTED]&token=[REDACTED]"
+                );
+                assert_eq!(value["future_secret"], "[REDACTED]");
+                assert_eq!(value["pid"], 123);
+                assert_eq!(value["port"], 3080);
+                assert_eq!(value["process_start_time"], 42);
+            } else if name.starts_with("logs/") {
+                assert!(text.contains("version 0.1.6"));
+                assert!(text.contains("ERROR: connection refused"));
+                assert!(text.contains("?foo='&token=[REDACTED]&token=[REDACTED]"));
+            }
+        }
+    }
+
+    #[test]
+    fn diagnostic_archive_remains_usable_with_invalid_json() {
+        use std::io::Read;
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("bundle.zip");
+        let mut zw = zip::ZipWriter::new(std::fs::File::create(&dest).unwrap());
+        let opts = zip::write::FileOptions::default();
+        for (name, data) in [
+            ("state.json", "{ token_url: synthetic-secret"),
+            (
+                "config.json",
+                r#"{"server":{"port":3080},"password":"synthetic-secret""#,
+            ),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, data).unwrap();
+            zip_add_file(&mut zw, &opts, name, &path).unwrap();
+        }
+        zip_write_text(
+            &mut zw,
+            &opts,
+            "diagnostics.txt",
+            "Node v22; ERROR config corrupt",
+        )
+        .unwrap();
+        zw.finish().unwrap();
+        let mut archive = zip::ZipArchive::new(std::fs::File::open(dest).unwrap()).unwrap();
+        for name in ["state.json", "config.json"] {
+            let mut text = String::new();
+            archive
+                .by_name(name)
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            assert!(!text.contains("synthetic-secret"));
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert!(value["diagnostic_error"]
+                .as_str()
+                .unwrap()
+                .contains("source contents omitted"));
+        }
+        let mut text = String::new();
+        archive
+            .by_name("diagnostics.txt")
+            .unwrap()
+            .read_to_string(&mut text)
+            .unwrap();
+        assert!(text.contains("Node v22; ERROR config corrupt"));
+    }
 
     #[test]
     fn is_newer_orders_pre_releases_by_semver_not_by_string() {
