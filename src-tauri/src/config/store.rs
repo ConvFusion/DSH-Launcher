@@ -62,6 +62,7 @@ fn ensure_dirs() {
 
 /// Append a line to the launcher's own log (and stderr, for `tauri dev`).
 pub fn log(msg: &str) {
+    let msg = super::redact_diagnostic_text(msg);
     eprintln!("[dsh-launcher] {msg}");
     let Ok(when) = OffsetDateTime::now_local() else {
         return;
@@ -228,6 +229,7 @@ fn harness_log_path() -> PathBuf {
 static HARNESS_LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
 
 pub fn harness_log_line(line: &str) {
+    let line = super::redact_diagnostic_text(line);
     ensure_dirs();
     let path = harness_log_path();
     let mut guard = match HARNESS_LOG.lock() {
@@ -288,6 +290,7 @@ static INSTALL_LOG: Mutex<Option<std::fs::File>> = Mutex::new(None);
 /// Append `text` (one or more lines) to install.log with a unix-timestamp
 /// prefix. Rotates once past the size cap (keeps a single .old copy).
 pub fn install_log_line(text: &str) {
+    let text = super::redact_diagnostic_text(text);
     ensure_dirs();
     let path = install_log_path();
     let mut guard = INSTALL_LOG.lock().unwrap();
