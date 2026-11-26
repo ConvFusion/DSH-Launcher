@@ -36,6 +36,14 @@ export default function App() {
    */
   const [updateLines, setUpdateLines] = useState<string[]>([]);
   const [updateError, setUpdateError] = useState<string | null>(null);
+  /**
+   * The version the last update attempt targeted. Kept after a failure so the
+   * user can retry *that* build: re-deriving the offer list from a refreshed
+   * update check can drop the channel they picked (a half-applied install can
+   * already report the recommended version as installed), leaving only the
+   * "newest" button — which installs a different build than the one chosen.
+   */
+  const [updateTarget, setUpdateTarget] = useState<string | null>(null);
   /** Which command produced the log above (install vs update), for its title. */
   const [consoleKind, setConsoleKind] = useState<ConsoleKind | null>(null);
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -154,6 +162,8 @@ export default function App() {
         launcherUpdateInfo={launcherUpdateInfo}
         updateLines={updateLines}
         updateError={updateError}
+        updateTarget={updateTarget}
+        setUpdateTarget={setUpdateTarget}
         consoleKind={consoleKind}
         setConsoleKind={setConsoleKind}
         setUpdateLines={setUpdateLines}
@@ -180,6 +190,8 @@ function AppShell({
   launcherUpdateInfo,
   updateLines,
   updateError,
+  updateTarget,
+  setUpdateTarget,
   consoleKind,
   setConsoleKind,
   setUpdateLines,
@@ -201,6 +213,8 @@ function AppShell({
   launcherUpdateInfo: UpdateInfo | null;
   updateLines: string[];
   updateError: string | null;
+  updateTarget: string | null;
+  setUpdateTarget: (v: string | null) => void;
   consoleKind: ConsoleKind | null;
   setConsoleKind: (kind: ConsoleKind | null) => void;
   setUpdateLines: (lines: string[]) => void;
@@ -322,9 +336,13 @@ function AppShell({
     setConsoleKind("update");
     setUpdateLines([]);
     setUpdateError(null);
+    // Pin the build this attempt is for, so a retry re-targets the same one
+    // instead of whatever the channel list happens to offer afterwards.
+    setUpdateTarget(targetVersion ?? null);
     try {
       if (wasRunning) await api.stopDsh();
       const installed = await api.installDsh(targetVersion);
+      setUpdateTarget(null);
       await refresh();
       if (wasRunning) await api.restartDsh(false);
       await refresh();
@@ -335,6 +353,20 @@ function AppShell({
       // seconds, but the npm output is what explains the failure.
       setUpdateError(String(e));
       notify(String(e));
+      // The install root may have been left half-updated, so re-read what the
+      // backend can see: otherwise the home page keeps offering an update based
+      // on a version that is no longer on disk.
+      await refresh();
+      checkUpdate();
+      // The confirmation dialog promises the service is restarted after an
+      // update; a failed update used to leave it stopped until the user noticed.
+      if (wasRunning) {
+        try {
+          await api.restartDsh(false);
+        } catch {
+          /* best effort — the install itself is what failed */
+        }
+      }
     } finally {
       setBusyPhase(null);
     }
@@ -388,10 +420,12 @@ function AppShell({
             launcherUpdateInfo={launcherUpdateInfo}
             updateLines={updateLines}
             updateError={updateError}
+            updateTarget={updateTarget}
             consoleKind={consoleKind}
             onDismissUpdateLog={() => {
               setUpdateLines([]);
               setUpdateError(null);
+              setUpdateTarget(null);
             }}
             onMainAction={mainAction}
             onUpdate={updateDsh}

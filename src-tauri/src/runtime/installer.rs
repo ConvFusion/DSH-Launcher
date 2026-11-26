@@ -57,6 +57,27 @@ where
     })
 }
 
+/// Stop npm and everything it spawned.
+///
+/// `Child::kill` signals npm only. npm runs dependency lifecycle scripts in
+/// child processes (`node-gyp`, `cnoke`, native builds) that inherit the output
+/// pipes and keep writing into the install root — so a timed-out install could
+/// silently keep modifying `node_modules` while the user retried. The child is
+/// spawned into its own process group (see the install command), which makes
+/// the group id equal to its pid, so a single `kill(-pid)` reaches all of them.
+async fn kill_install_tree(child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            // SAFETY: `kill(2)` is async-signal-safe, and `pid` was just read
+            // from a child that was placed in its own process group — so the
+            // negative pid cannot name the launcher's own group.
+            unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) };
+        }
+    }
+    let _ = child.kill().await;
+}
+
 fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(Duration::from_secs(300))
@@ -361,7 +382,18 @@ fn extract_zip(bytes: &[u8], dest: &std::path::Path) -> Result<(), String> {
 // DeepSeek Harness installation
 // ---------------------------------------------------------------------------
 
-const NPM_TIMEOUT_SECS: u64 = 10 * 60;
+/// How long a single `npm install` may run before the launcher gives up.
+///
+/// A cold install on a slow link legitimately takes minutes: on the network
+/// that motivated this value a single tarball fetch was measured at 130–394 s
+/// and a successful install of ~1 500 packages took 7 minutes — so the old
+/// 10-minute cap killed one install while npm was still fetching. That left the
+/// install root half-updated, forced a retry, and a retry is exactly where the
+/// user can end up on a *different* channel than the one they picked. The log
+/// panel streams every npm line and shows elapsed time, so a genuinely hung
+/// install is still visible while it runs; this cap only exists to stop a dead
+/// network from holding the button hostage forever.
+const NPM_TIMEOUT_SECS: u64 = 30 * 60;
 
 /// Dependencies whose lifecycle scripts the install genuinely needs.
 ///
@@ -450,6 +482,23 @@ fn ensure_install_manifest(manifest: &std::path::Path) -> Result<(), String> {
         ),
     )
     .map_err(|e| format!("write {}: {e}", manifest.display()))
+}
+
+/// Whether two version strings name the same release.
+///
+/// Tolerates a leading `v` and compares semantically when both sides parse, so
+/// `v0.2.2-rc.5` matches `0.2.2-rc.5`; anything unparseable falls back to a
+/// literal comparison rather than silently counting as a match.
+fn same_release(requested: &str, landed: &str) -> bool {
+    let requested = requested.trim_start_matches('v');
+    let landed = landed.trim_start_matches('v');
+    match (
+        semver::Version::parse(requested),
+        semver::Version::parse(landed),
+    ) {
+        (Ok(requested), Ok(landed)) => requested == landed,
+        _ => requested == landed,
+    }
 }
 
 /// Install (or update) the DSH package using the given Node runtime, into
@@ -574,6 +623,11 @@ pub async fn install_dsh(
     };
 
     log(&format!("running: {} install {spec}", node.display()));
+    // The exact package spec belongs in install.log too: `running:` goes to the
+    // launcher log, but the bundle users attach to a bug report is install.log,
+    // and "which build was asked for" is the first thing to check when the disk
+    // ends up with a different one.
+    install_log_line(&format!("dsh install spec: {spec}"));
 
     // Show the exact command as the first line of the live log, so the user
     // sees what is running (and can paste it into a terminal if it fails).
@@ -610,6 +664,12 @@ pub async fn install_dsh(
             .stderr(std::process::Stdio::piped());
         // Node.js must be on PATH for npm's own lifecycle scripts — see above.
         cmd.env("PATH", &child_path);
+        // Put npm in its own process group so a timeout can stop npm *and* the
+        // build scripts it spawns (`node-gyp`, `cnoke`, …). Killing only npm
+        // leaves those children writing into the install root while a retry
+        // runs — or after the launcher has already reported the failure.
+        #[cfg(unix)]
+        cmd.process_group(0);
         // Drop any npm script policy inherited from whoever launched us, so the
         // policy that applies is the one in the install root's package.json.
         for (key, _) in std::env::vars() {
@@ -647,13 +707,24 @@ pub async fn install_dsh(
         .await
         {
             Err(_) => {
-                // Don't leave a stray npm behind on a hung network.
-                let _ = child.kill().await;
+                // Don't leave a stray npm (or its build scripts) behind on a
+                // hung network — they would keep mutating node_modules while
+                // the user retries.
+                kill_install_tree(&mut child).await;
+                // This used to go to the UI only, so the exported log bundle
+                // simply stopped mid-install with no explanation. Record it.
+                install_log_line(&format!(
+                    "dsh install timed out after {NPM_TIMEOUT_SECS}s (spec {spec}) — npm and its children were stopped"
+                ));
                 emit_line(
                     &on_line,
                     format!("[launcher] npm install timed out after {NPM_TIMEOUT_SECS}s — stopped."),
                 );
-                return Err("npm install timed out after 10 minutes.".to_string());
+                return Err(format!(
+                    "npm install timed out after {} minutes and was stopped. \
+                     Nothing was reported as updated — the npm output above shows how far it got.",
+                    NPM_TIMEOUT_SECS / 60
+                ));
             }
             Ok(Err(e)) => return Err(format!("run npm: {e}")),
             Ok(Ok(s)) => s,
@@ -758,6 +829,29 @@ pub async fn install_dsh(
     if !dsh_bin_js_in(dir).exists() {
         return Err("npm finished but the DSH entry point is missing (unexpected package layout).".into());
     }
+
+    // npm exited 0 — but did it install the build the user asked for? The UI
+    // advertises one exact version per channel, and the user confirmed that
+    // version in a dialog; anything else on disk must be reported as a
+    // failure, not as "updated to vX". Without this check a channel drift
+    // (npm resolving another dist-tag, a `--prefix` root whose package.json
+    // pins a different release, …) reaches the user as a cheerful success
+    // toast naming a version they never chose.
+    if let Some(want) = version {
+        if !same_release(want, &installed.version) {
+            let e = format!(
+                "npm installed DeepSeek Harness v{}, but v{} was requested — \
+                 the requested build was not installed. See the npm output above.",
+                installed.version.trim_start_matches('v'),
+                want.trim_start_matches('v'),
+            );
+            log(&format!("dsh install FAILED: {e}"));
+            install_log_line(&format!("dsh install FAILED: {e}"));
+            emit_line(&on_line, format!("[launcher] {e}"));
+            return Err(e);
+        }
+    }
+
     log(&format!("DSH installed: v{} at {}", installed.version, dir.display()));
     install_log_line(&format!(
         "DSH installed: v{} at {}",
@@ -865,13 +959,37 @@ pub async fn latest_dsh_version() -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{channels_from_dist_tags, newest_dist_tag_version};
+    use super::{channels_from_dist_tags, newest_dist_tag_version, same_release};
 
     fn tags(pairs: &[(&str, &str)]) -> serde_json::Map<String, serde_json::Value> {
         pairs
             .iter()
             .map(|(k, v)| (k.to_string(), serde_json::json!(v)))
             .collect()
+    }
+
+    #[test]
+    fn a_pinned_install_must_land_the_requested_build() {
+        // The incident this guard exists for: the user picked the recommended
+        // 0.2.2-rc.5, and 0.2.3-alpha.2 (the newest channel) ended up on disk.
+        // That must be reported as a failure, not as "updated to v0.2.3-alpha.2".
+        assert!(same_release("0.2.2-rc.5", "0.2.2-rc.5"));
+        assert!(!same_release("0.2.2-rc.5", "0.2.3-alpha.2"));
+        // Pre-release order still matters: rc.5 is not rc.6.
+        assert!(!same_release("0.2.2-rc.5", "0.2.2-rc.6"));
+    }
+
+    #[test]
+    fn a_leading_v_does_not_count_as_a_mismatch() {
+        // The UI shows versions with a `v`, package.json versions have none.
+        assert!(same_release("v0.2.2-rc.5", "0.2.2-rc.5"));
+        assert!(same_release("0.2.2-rc.5", "v0.2.2-rc.5"));
+    }
+
+    #[test]
+    fn unparseable_versions_compare_literally() {
+        assert!(!same_release("0.2.2-rc.5", "unknown"));
+        assert!(same_release("unknown", "unknown"));
     }
 
     #[test]

@@ -29,6 +29,12 @@ interface Props {
   updateLines: string[];
   /** Set when the last install/update attempt failed; keeps the log on screen. */
   updateError: string | null;
+  /**
+   * Version the last update attempt targeted. After a failure it stays set so
+   * the user can retry *that* build — the channel buttons may no longer offer
+   * it (e.g. a half-applied install already reports it as installed).
+   */
+  updateTarget: string | null;
   /** Which command the log belongs to, so the panel is titled correctly. */
   consoleKind: ConsoleKind | null;
   onDismissUpdateLog: () => void;
@@ -65,6 +71,7 @@ export default function Home({
   launcherUpdateInfo,
   updateLines,
   updateError,
+  updateTarget,
   consoleKind,
   onDismissUpdateLog,
   onMainAction,
@@ -349,6 +356,21 @@ export default function Home({
             {consoleBusy && <span className="spinner" />}
             <span className="update-log-title">{logTitle}</span>
             {consoleBusy && <span className="elapsed">{formatElapsed(elapsed)}</span>}
+            {/* Retry the build the user actually chose. The channel buttons
+                below are derived from a fresh update check and can drop that
+                build (a partially applied install already reports it as
+                installed), which used to leave only "newest" — a different
+                version than the one the user picked. Routed through the same
+                confirmation dialog as a normal update. */}
+            {!consoleBusy && updateTarget && (
+              <button
+                className="btn small update retry"
+                onClick={() => setPendingUpdate(updateTarget)}
+                title={t("home.update_retry", { version: updateTarget })}
+              >
+                {t("home.update_retry", { version: updateTarget })}
+              </button>
+            )}
             {!consoleBusy && (
               <button
                 className="update-log-dismiss"

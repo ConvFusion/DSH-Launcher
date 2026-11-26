@@ -311,6 +311,13 @@ body {
   color: var(--muted-2);
 }
 
+/* "Retry vX" beside a failed update log: compact, so the head stays one line. */
+.home .update-log-head .btn.retry {
+  padding: 3px 10px;
+  font-size: 12px;
+  border-radius: 7px;
+}
+
 .home .update-log-dismiss {
   background: none;
   border: none;

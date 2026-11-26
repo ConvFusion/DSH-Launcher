@@ -131,8 +131,12 @@ pub async fn install_dsh_package(
         Some(on_line),
         None,
     )
-    .await?;
+    .await;
+    // Invalidate regardless of the outcome: a failed or timed-out npm run can
+    // leave a partially applied install, and a cached "v0.2.2-rc.1 installed"
+    // would then hide what is really on disk from the next update check.
     state.invalidate_env_cache();
+    let installed = installed?;
     let snap = state.proc.snapshot();
     let _ = app.emit("dsh://status", status_payload(&state, &snap));
     Ok(installed)
